@@ -684,6 +684,12 @@ pub fn layers(project: &Project, frame: u32, scale: f32, images: &dyn Fn(&str) -
     order
         .into_iter()
         .filter_map(|clip| {
+            if let Some(inner) = &clip.nested {
+                let mut nested = Frame::default();
+                render(inner, frame - clip.start + clip.offset, scale, &mut nested, images);
+                let image = Arc::new(Image { width: nested.width, height: nested.height, pixels: nested.pixels });
+                return Some((clip, resolve(clip, time, scale, Some(image))?));
+            }
             let image = match (&clip.text, &clip.media) {
                 (Some(text), _) => Some(Arc::new(text_image(text, clip.text_size, clip.color, clip.text_stroke, clip.text_background)?)),
                 (None, Some(path)) => Some(images(path)?),
@@ -788,6 +794,16 @@ mod tests {
         let space = Space { across: [1.0, 0.0, 0.0], down: [0.0, 1.0, 0.0], normal: [0.0, 0.0, 1.0], depth: 0.0, camera: 2000.0 };
         let (x, y) = project_local(&space, 30.0, -20.0).unwrap();
         assert!((x - 30.0).abs() < 0.01 && (y + 20.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn nested_clips_render() {
+        let mut project = small();
+        let mut clip = project.new_clip(Shape::Solid, 0);
+        clip.color = [50, 60, 70];
+        project.clips.push(clip);
+        project.nest(0);
+        assert_eq!(first(&project), [50, 60, 70]);
     }
 
     #[test]

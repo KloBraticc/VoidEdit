@@ -324,6 +324,8 @@ pub struct Clip {
     pub text_stroke: f32,
     #[serde(default)]
     pub text_background: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nested: Option<Box<Project>>,
     #[serde(default = "default_zero")]
     pub rotation_x: Param,
     #[serde(default = "default_zero")]
@@ -457,6 +459,42 @@ impl Project {
         clip
     }
 
+    pub fn nest(&mut self, index: usize) {
+        if index >= self.clips.len() {
+            return;
+        }
+        let mut inner_clip = self.clips.remove(index);
+        let (start, end) = (inner_clip.start, inner_clip.end);
+        let track = inner_clip.track;
+        inner_clip.start = 0;
+        inner_clip.end = end - start;
+        let mut inner = Project { width: self.width, height: self.height, fps: self.fps, duration: end - start + 1, background: [0, 0, 0], media: Vec::new(), markers: Vec::new(), ..Project::default() };
+        inner_clip.track = inner.track_of(self.tracks[track].kind);
+        inner.clips.push(inner_clip);
+        let mut outer = self.new_clip(Shape::Solid, start);
+        outer.name = "Nested".into();
+        outer.end = end;
+        outer.track = track;
+        outer.nested = Some(Box::new(inner));
+        self.clips.push(outer);
+    }
+
+    pub fn wanted_media(&self, frame: u32, depth: u32, found: &mut Vec<(String, f64)>) {
+        if depth > MAX_NESTING {
+            return;
+        }
+        for clip in &self.clips {
+            if !clip.visible || frame < clip.start || frame >= clip.end || self.tracks.get(clip.track).is_none_or(|track| track.kind != TrackKind::Video) {
+                continue;
+            }
+            if let Some(inner) = &clip.nested {
+                inner.wanted_media(frame - clip.start + clip.offset, depth + 1, found);
+            } else if let Some(path) = &clip.media {
+                found.push((path.clone(), clip.media_seconds(frame, self.fps)));
+            }
+        }
+    }
+
     pub fn add_track(&mut self, kind: TrackKind) {
         let count = self.tracks.iter().filter(|track| track.kind == kind).count() + 1;
         let label = if kind == TrackKind::Video { "Video" } else { "Audio" };
@@ -584,6 +622,7 @@ impl Project {
             mask: Mask::default(),
             text_stroke: 0.0,
             text_background: false,
+            nested: None,
             rotation_x: default_zero(),
             rotation_y: default_zero(),
             depth: default_zero(),
@@ -653,6 +692,8 @@ impl Project {
         }
     }
 }
+
+pub const MAX_NESTING: u32 = 8;
 
 #[derive(Default)]
 pub struct History {
@@ -789,6 +830,19 @@ mod tests {
         assert_eq!(added, 2);
         assert_eq!(project.clips[0].start, 30);
         assert_eq!(project.clips[1].text.as_deref(), Some("Second\nline"));
+    }
+
+    #[test]
+    fn nesting_wraps_a_clip_and_finds_its_media() {
+        let mut project = Project::default();
+        project.clips.push(project.new_media_clip("a.mp4", 10, Some((16, 16)), 1.0));
+        project.nest(0);
+        assert_eq!(project.clips.len(), 1);
+        assert_eq!(project.clips[0].start, 10);
+        let mut found = Vec::new();
+        project.wanted_media(15, 0, &mut found);
+        assert_eq!(found[0].0, "a.mp4");
+        assert!(found[0].1 > 0.1);
     }
 
     #[test]

@@ -331,9 +331,72 @@ pub fn mix(library: &Library, clips: &[AudioClip], start: i64, frames: usize, ra
     mixed
 }
 
+pub fn match_patch(previous: &Image, next: &Image, center: (i64, i64), patch: i64, search: i64) -> Option<(i64, i64)> {
+    let luma = |image: &Image, x: i64, y: i64| -> Option<i64> {
+        if x < 0 || y < 0 || x >= image.width as i64 || y >= image.height as i64 {
+            return None;
+        }
+        let start = (y as usize * image.width + x as usize) * 4;
+        let pixel = image.pixels.get(start..start + 3)?;
+        Some(pixel[0] as i64 * 2 + pixel[1] as i64 * 5 + pixel[2] as i64)
+    };
+    let mut best: Option<(i64, (i64, i64))> = None;
+    for dy in -search..=search {
+        for dx in -search..=search {
+            let mut score = 0i64;
+            let mut valid = true;
+            'patch: for py in -patch..=patch {
+                for px in -patch..=patch {
+                    let (Some(a), Some(b)) = (luma(previous, center.0 + px, center.1 + py), luma(next, center.0 + dx + px, center.1 + dy + py)) else {
+                        valid = false;
+                        break 'patch;
+                    };
+                    score += (a - b).abs();
+                }
+            }
+            let penalty = (dx.abs() + dy.abs()) * 2;
+            if valid && best.is_none_or(|(top, _)| score + penalty < top) {
+                best = Some((score + penalty, (center.0 + dx, center.1 + dy)));
+            }
+        }
+    }
+    best.map(|(_, point)| point)
+}
+
+pub fn track_point(library: &Library, path: &str, fps: u32, first: u32, last: u32, start: (i64, i64), mut report: impl FnMut(u32, (i64, i64)) -> bool) -> Option<()> {
+    let source = library.source(path)?;
+    let want = |frame: u32| FrameWant { path: path.to_string(), seconds: frame as f64 / fps.max(1) as f64, scale: 1.0 };
+    let mut previous = decode(&source, &want(first))?;
+    let mut point = start;
+    for frame in first + 1..last {
+        let next = decode(&source, &want(frame))?;
+        point = match_patch(&previous, &next, point, 12, 24)?;
+        if !report(frame, point) {
+            break;
+        }
+        previous = next;
+    }
+    Some(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tracking_follows_a_moving_square() {
+        let image = |x0: usize| {
+            let mut pixels = vec![0u8; 128 * 128 * 4];
+            for y in 50..70 {
+                for x in x0..x0 + 20 {
+                    pixels[(y * 128 + x) * 4] = 255;
+                    pixels[(y * 128 + x) * 4 + 1] = 255;
+                }
+            }
+            Image { width: 128, height: 128, pixels }
+        };
+        assert_eq!(match_patch(&image(40), &image(47), (50, 60), 12, 24), Some((57, 60)));
+    }
 
     #[test]
     fn missing_files_do_not_crash() {

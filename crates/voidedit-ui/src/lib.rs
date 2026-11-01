@@ -11,8 +11,8 @@ use settings::Settings;
 use voidedit_core::{timecode, Clip, Effect, History, MaskShape, Param, Project, Shape, TrackKind, BLENDS, EFFECT_NAMES, TRANSITIONS};
 use voidedit_export::{audio_clips, export_with, ExportFormat, ExportOptions, Progress};
 use voidedit_gpu::GpuCompositor;
-use voidedit_media::{waveform, Audio, FrameWant, Frames, Library};
-use voidedit_render::{render, wanted_frame, Frame};
+use voidedit_media::{track_point, waveform, Audio, FrameWant, Frames, Library};
+use voidedit_render::{render, Frame};
 
 const HEADER_WIDTH: f32 = 128.0;
 const RULER_HEIGHT: f32 = 28.0;
@@ -37,6 +37,15 @@ enum Drag {
     Move { grab: f32 },
     TrimStart,
     TrimEnd,
+}
+
+struct TrackJob {
+    points: Arc<Mutex<Vec<(u32, (i64, i64))>>>,
+    done: Arc<std::sync::atomic::AtomicBool>,
+    target: usize,
+    source_clip: usize,
+    origin: (f32, f32),
+    start: (i64, i64),
 }
 
 struct ExportJob {
@@ -64,6 +73,9 @@ pub struct App {
     tool: Tool,
     left: LeftTab,
     drawing_mask: bool,
+    picking_track: bool,
+    tracking: Option<TrackJob>,
+    track_target: usize,
     show_mixer: bool,
     drag: Option<(usize, Drag)>,
     zoom: f32,
@@ -120,6 +132,9 @@ impl App {
             tool: Tool::Select,
             left: LeftTab::Project,
             drawing_mask: false,
+            picking_track: false,
+            tracking: None,
+            track_target: 0,
             show_mixer: false,
             drag: None,
             zoom: 6.0,
@@ -174,6 +189,53 @@ impl App {
             self.gpu_texture = Some(renderer.register_native_texture(&state.device, &view, eframe::wgpu::FilterMode::Linear));
         }
         true
+    }
+
+    fn start_tracking(&mut self, source_clip: usize, point: (i64, i64)) {
+        let Some(clip) = self.project.clips.get(source_clip) else { return };
+        let Some(path) = clip.media.clone() else { return };
+        let fps = self.project.fps;
+        let first = (self.frame.saturating_sub(clip.start) + clip.offset).max(clip.offset);
+        let last = clip.end - clip.start + clip.offset;
+        let target = self.track_target.min(self.project.clips.len().saturating_sub(1));
+        let Some(follower) = self.project.clips.get(target) else { return };
+        let origin = (follower.x.at(self.frame as f32), follower.y.at(self.frame as f32));
+        let points = Arc::new(Mutex::new(Vec::new()));
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (library, shared, finished, repaint) = (self.library.clone(), points.clone(), done.clone(), self.context.clone());
+        let _ = std::thread::Builder::new().name("tracking".into()).spawn(move || {
+            let _ = track_point(&library, &path, fps, first, last, point, |frame, found| {
+                if let Ok(mut list) = shared.lock() {
+                    list.push((frame, found));
+                }
+                repaint.request_repaint();
+                true
+            });
+            finished.store(true, Ordering::Relaxed);
+            repaint.request_repaint();
+        });
+        self.tracking = Some(TrackJob { points, done, target, source_clip, origin, start: point });
+        self.status = "Tracking".into();
+    }
+
+    fn finish_tracking(&mut self) {
+        let Some(job) = &self.tracking else { return };
+        if !job.done.load(Ordering::Relaxed) {
+            return;
+        }
+        let points = job.points.lock().map(|list| list.clone()).unwrap_or_default();
+        let (target, source_clip, origin, start) = (job.target, job.source_clip, job.origin, job.start);
+        self.tracking = None;
+        let Some(source) = self.project.clips.get(source_clip).cloned() else { return };
+        let ratio_x = source.scale.at(self.frame as f32) / 100.0;
+        if let Some(follower) = self.project.clips.get_mut(target) {
+            for (media_frame, point) in &points {
+                let frame = media_frame + source.start - source.offset;
+                follower.x.set_key(frame, origin.0 + (point.0 - start.0) as f32 * ratio_x);
+                follower.y.set_key(frame, origin.1 + (point.1 - start.1) as f32 * ratio_x);
+            }
+        }
+        self.status = format!("Tracked {} frames", points.len());
     }
 
     fn accent(&self) -> Color32 {
@@ -604,6 +666,15 @@ impl App {
                         }
                     }
                 });
+                ui.menu_button("Compose", |ui| {
+                    if ui.add_enabled(self.selected.is_some(), egui::Button::new("Nest Selected Clip")).clicked() {
+                        if let Some(index) = self.selected.take() {
+                            self.project.nest(index);
+                            self.selected = Some(self.project.clips.len() - 1);
+                        }
+                        ui.close_menu();
+                    }
+                });
                 ui.menu_button("Captions", |ui| {
                     if ui.button("Import SRT...").clicked() {
                         ui.close_menu();
@@ -897,6 +968,7 @@ impl App {
         ui.separator();
         let frame = self.frame;
         let accent = self.accent();
+        let names: Vec<String> = self.project.clips.iter().map(|clip| clip.name.clone()).collect();
         let Some(clip) = self.selected.and_then(|index| self.project.clips.get_mut(index)) else {
             ui.add_space(20.0);
             ui.vertical_centered(|ui| ui.label(RichText::new("Select a clip").weak()));
@@ -953,6 +1025,19 @@ impl App {
                     ui.add(egui::DragValue::new(&mut clip.fade_out).suffix(" f"));
                 });
             });
+            if clip.media.is_some() {
+                egui::CollapsingHeader::new("Motion Tracker").default_open(false).show(ui, |ui| {
+                    egui::ComboBox::from_label("Clip to move").selected_text(names.get(self.track_target).cloned().unwrap_or_default()).show_ui(ui, |ui| {
+                        for (index, name) in names.iter().enumerate() {
+                            ui.selectable_value(&mut self.track_target, index, name);
+                        }
+                    });
+                    ui.toggle_value(&mut self.picking_track, "Click a point on the preview");
+                    if self.tracking.is_some() {
+                        ui.spinner();
+                    }
+                });
+            }
             egui::CollapsingHeader::new("Mask").default_open(false).show(ui, |ui| {
                 egui::ComboBox::from_label("Shape").selected_text(format!("{:?}", clip.mask.shape)).show_ui(ui, |ui| {
                     for shape in [MaskShape::None, MaskShape::Rectangle, MaskShape::Ellipse, MaskShape::Polygon] {
@@ -1093,14 +1178,9 @@ impl App {
         let scale = (size.x * pixels / self.project.width as f32 * self.settings.preview_quality).clamp(0.05, 1.0);
         let fps = self.project.fps;
         let time = self.frame;
-        let wants: Vec<FrameWant> = self
-            .project
-            .clips
-            .iter()
-            .filter(|clip| wanted_frame(&self.project, clip, time))
-            .filter_map(|clip| Some(FrameWant { path: clip.media.clone()?, seconds: clip.media_seconds(time, fps), scale }))
-            .collect();
-        self.frames.want(wants);
+        let mut found = Vec::new();
+        self.project.wanted_media(time, 0, &mut found);
+        self.frames.want(found.into_iter().map(|(path, seconds)| FrameWant { path, seconds, scale }).collect());
         let generation = self.frames.generation();
         let stale = self.rendered.as_ref().is_none_or(|(frame, project, s, g)| *frame != self.frame || *s != scale || *g != generation || *project != self.project);
         if stale {
@@ -1120,7 +1200,19 @@ impl App {
             let shown = if self.gpu_used { self.gpu_texture } else { self.texture.as_ref().map(egui::TextureHandle::id) };
             if let Some(id) = shown {
                 let picture = ui.add(egui::Image::new((id, size)).fit_to_exact_size(size).corner_radius(4).sense(Sense::click()));
-                if self.drawing_mask && picture.clicked() {
+                if self.picking_track && picture.clicked() {
+                    if let (Some(position), Some(index)) = (picture.interact_pointer_pos(), self.selected) {
+                        if let Some(clip) = self.project.clips.get(index) {
+                            let px = (position.x - picture.rect.left()) / picture.rect.width() * self.project.width as f32;
+                            let py = (position.y - picture.rect.top()) / picture.rect.height() * self.project.height as f32;
+                            let ratio = clip.scale.at(self.frame as f32).max(0.01) / 100.0;
+                            let x = ((px - clip.x.at(self.frame as f32)) / ratio + clip.width / 2.0) as i64;
+                            let y = ((py - clip.y.at(self.frame as f32)) / ratio + clip.height / 2.0) as i64;
+                            self.picking_track = false;
+                            self.start_tracking(index, (x, y));
+                        }
+                    }
+                } else if self.drawing_mask && picture.clicked() {
                     if let (Some(position), Some(clip)) = (picture.interact_pointer_pos(), self.selected.and_then(|index| self.project.clips.get_mut(index))) {
                         let u = (position.x - picture.rect.left()) / picture.rect.width() * self.project.width as f32;
                         let v = (position.y - picture.rect.top()) / picture.rect.height() * self.project.height as f32;
@@ -1388,6 +1480,7 @@ impl eframe::App for App {
         self.tick(ctx);
         self.sync_audio(ctx);
         self.autosave();
+        self.finish_tracking();
         self.menu(ctx);
         self.windows(ctx);
         egui::TopBottomPanel::bottom("timeline").resizable(true).default_height(330.0).min_height(120.0).show_animated(ctx, self.show_timeline, |ui| {

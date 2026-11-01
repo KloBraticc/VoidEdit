@@ -9,7 +9,7 @@ use filmcraft_h264enc::{Encoder, EncoderConfig, PacketFormat, RateControl};
 use filmcraft_isobmff::{AvcConfig, Brand, Mp4Writer, SampleEntry, TrackConfig, WriteSample, WriterOptions};
 use voidedit_core::Project;
 use voidedit_media::{decode_now, mix, AudioClip, FrameWant, Gain, Library};
-use voidedit_render::{render, wanted_frame, Frame, Image};
+use voidedit_render::{render, Frame, Image};
 
 const AUDIO_RATE: u32 = 48_000;
 
@@ -149,12 +149,11 @@ fn write_png_sequence(project: &Project, library: &Library, folder: &Path, scale
 
 fn gather(project: &Project, library: &Library, index: u32) -> HashMap<String, Arc<Image>> {
     let mut images = HashMap::new();
-    for clip in project.clips.iter().filter(|clip| wanted_frame(project, clip, index)) {
-        if let Some(media) = &clip.media {
-            let want = FrameWant { path: media.clone(), seconds: clip.media_seconds(index, project.fps.max(1)), scale: 1.0 };
-            if let Some(image) = decode_now(library, &want) {
-                images.insert(media.clone(), image);
-            }
+    let mut found = Vec::new();
+    project.wanted_media(index, 0, &mut found);
+    for (path, seconds) in found {
+        if let Some(image) = decode_now(library, &FrameWant { path: path.clone(), seconds, scale: 1.0 }) {
+            images.insert(path, image);
         }
     }
     images
