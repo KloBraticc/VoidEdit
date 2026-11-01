@@ -769,6 +769,13 @@ pub fn layers(project: &Project, frame: u32, scale: f32, images: &dyn Fn(&str) -
                 return Some((clip, resolve(clip, time, scale, Some(image))?));
             }
             let image = match (&clip.text, &clip.media) {
+                (Some(text), _) if clip.typewriter => {
+                    let length = text.chars().count();
+                    let span = (clip.end - clip.start).max(1) as f32 * 0.7;
+                    let shown = (((time - clip.start as f32) / span).clamp(0.0, 1.0) * length as f32).ceil() as usize;
+                    let visible: String = text.chars().take(shown.max(1)).collect();
+                    Some(Arc::new(text_image(&visible, clip.text_size, clip.color, clip.text_stroke, clip.text_background)?))
+                }
                 (Some(text), _) => Some(Arc::new(text_image(text, clip.text_size, clip.color, clip.text_stroke, clip.text_background)?)),
                 (None, Some(path)) => Some(images(path)?),
                 (None, None) => None,

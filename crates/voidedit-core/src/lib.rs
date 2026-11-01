@@ -154,6 +154,23 @@ pub enum Blend {
     SoftLight,
 }
 
+pub const LOOKS: [&str; 8] = ["Cinematic", "Vintage", "Black and White", "Warm", "Cool", "Vivid", "Faded", "Noir"];
+
+pub fn look(name: &str) -> Vec<Effect> {
+    let p = Param::new;
+    match name {
+        "Cinematic" => vec![Effect::Contrast { amount: p(15.0) }, Effect::Saturation { amount: p(-10.0) }, Effect::Temperature { amount: p(-8.0) }, Effect::Vignette { amount: p(35.0) }],
+        "Vintage" => vec![Effect::Sepia, Effect::Contrast { amount: p(-10.0) }, Effect::Noise { amount: p(6.0) }, Effect::Vignette { amount: p(40.0) }],
+        "Black and White" => vec![Effect::Grayscale, Effect::Contrast { amount: p(15.0) }],
+        "Warm" => vec![Effect::Temperature { amount: p(25.0) }, Effect::Saturation { amount: p(10.0) }],
+        "Cool" => vec![Effect::Temperature { amount: p(-25.0) }, Effect::Saturation { amount: p(5.0) }],
+        "Vivid" => vec![Effect::Vibrance { amount: p(50.0) }, Effect::Contrast { amount: p(10.0) }],
+        "Faded" => vec![Effect::Levels { black: p(-30.0), white: p(255.0) }, Effect::Saturation { amount: p(-25.0) }],
+        "Noir" => vec![Effect::Grayscale, Effect::Contrast { amount: p(45.0) }, Effect::Vignette { amount: p(60.0) }, Effect::Noise { amount: p(5.0) }],
+        _ => Vec::new(),
+    }
+}
+
 pub const BLENDS: [Blend; 9] = [Blend::Normal, Blend::Multiply, Blend::Screen, Blend::Overlay, Blend::Add, Blend::Darken, Blend::Lighten, Blend::Difference, Blend::SoftLight];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -347,6 +364,8 @@ pub struct Clip {
     pub text_stroke: f32,
     #[serde(default)]
     pub text_background: bool,
+    #[serde(default)]
+    pub typewriter: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nested: Option<Box<Project>>,
     #[serde(default = "default_zero")]
@@ -518,6 +537,19 @@ impl Project {
         }
     }
 
+    pub fn set_aspect(&mut self, width: u32, height: u32) {
+        let (old_w, old_h) = (self.width as f32, self.height as f32);
+        self.width = width;
+        self.height = height;
+        let fit = (width as f32 / old_w).min(height as f32 / old_h);
+        for clip in &mut self.clips {
+            let (x, y) = (clip.x.base, clip.y.base);
+            clip.x.base = (x - old_w / 2.0) * fit + width as f32 / 2.0;
+            clip.y.base = (y - old_h / 2.0) * fit + height as f32 / 2.0;
+            clip.scale.base *= fit;
+        }
+    }
+
     pub fn add_track(&mut self, kind: TrackKind) {
         let count = self.tracks.iter().filter(|track| track.kind == kind).count() + 1;
         let label = if kind == TrackKind::Video { "Video" } else { "Audio" };
@@ -645,6 +677,7 @@ impl Project {
             mask: Mask::default(),
             text_stroke: 0.0,
             text_background: false,
+            typewriter: false,
             nested: None,
             rotation_x: default_zero(),
             rotation_y: default_zero(),
@@ -866,6 +899,18 @@ mod tests {
         project.wanted_media(15, 0, &mut found);
         assert_eq!(found[0].0, "a.mp4");
         assert!(found[0].1 > 0.1);
+    }
+
+    #[test]
+    fn looks_exist_and_aspect_recenters() {
+        for name in LOOKS {
+            assert!(!look(name).is_empty());
+        }
+        let mut project = Project::default();
+        project.clips.push(project.new_clip(Shape::Solid, 0));
+        project.set_aspect(1080, 1920);
+        assert_eq!(project.clips[0].x.base, 540.0);
+        assert_eq!(project.clips[0].y.base, 960.0);
     }
 
     #[test]

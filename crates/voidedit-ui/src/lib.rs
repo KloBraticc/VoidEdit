@@ -9,7 +9,7 @@ use std::time::Instant;
 use egui_dock::{DockArea, DockState, NodeIndex, Style, TabViewer};
 use eframe::egui::{self, Color32, Pos2, Rect, RichText, Sense, Stroke, Vec2};
 use settings::Settings;
-use voidedit_core::{timecode, Clip, Ease, Effect, History, MaskShape, Param, Project, Shape, TrackKind, BLENDS, EFFECT_NAMES, TRANSITIONS};
+use voidedit_core::{timecode, Clip, Ease, Effect, History, MaskShape, Param, Project, Shape, TrackKind, BLENDS, EFFECT_NAMES, LOOKS, TRANSITIONS};
 use voidedit_export::{audio_clips, export_with, ExportFormat, ExportOptions, Progress};
 use voidedit_gpu::GpuCompositor;
 use voidedit_media::{decode_now, track_point, waveform, Audio, FrameWant, Frames, Library};
@@ -785,6 +785,13 @@ impl App {
                         ui.close_menu();
                     }
                     ui.separator();
+                    for (label, width, height) in [("16:9 Landscape 1080p", 1920, 1080), ("9:16 Vertical 1080p", 1080, 1920), ("1:1 Square", 1080, 1080), ("4:5 Portrait", 1080, 1350), ("4K Landscape", 3840, 2160)] {
+                        if ui.button(label).clicked() {
+                            self.project.set_aspect(width, height);
+                            ui.close_menu();
+                        }
+                    }
+                    ui.separator();
                     ui.horizontal(|ui| {
                         ui.label("Size");
                         ui.add(egui::DragValue::new(&mut self.project.width).range(16..=7680));
@@ -1035,6 +1042,18 @@ impl App {
                     if selected.is_none() {
                         ui.label(RichText::new("Select a clip to add effects").weak());
                     }
+                    ui.separator();
+                    ui.strong("Looks");
+                    for name in LOOKS {
+                        if !filter.is_empty() && !name.to_lowercase().contains(&filter) {
+                            continue;
+                        }
+                        if ui.add_enabled(selected.is_some(), egui::Button::new(name).min_size(Vec2::new(ui.available_width(), 24.0))).clicked() {
+                            if let Some(clip) = selected.and_then(|index| self.project.clips.get_mut(index)) {
+                                clip.effects.extend(voidedit_core::look(name));
+                            }
+                        }
+                    }
                 });
             }
         }
@@ -1097,6 +1116,7 @@ impl App {
                     ui.add(egui::Slider::new(&mut clip.text_size, 8.0..=400.0).text("Size"));
                     ui.add(egui::Slider::new(&mut clip.text_stroke, 0.0..=16.0).text("Outline"));
                     ui.checkbox(&mut clip.text_background, "Background");
+                    ui.checkbox(&mut clip.typewriter, "Typewriter animation");
                     ui.horizontal(|ui| {
                         ui.label("Color");
                         ui.color_edit_button_srgb(&mut clip.color);
