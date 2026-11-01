@@ -109,8 +109,6 @@ pub struct App {
     show_inspector: bool,
     bin: usize,
     player_full: bool,
-    page: u8,
-    page_changed: Instant,
     applied_round: Option<bool>,
     wallpaper_light: f32,
     show_home: bool,
@@ -238,8 +236,6 @@ impl App {
             show_inspector: true,
             bin: 0,
             player_full: false,
-            page: 255,
-            page_changed: Instant::now(),
             applied_round: None,
             wallpaper_light: 0.5,
             show_home: true,
@@ -350,24 +346,6 @@ impl App {
             if command.spawn().is_ok() {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
-        }
-    }
-
-    fn page_transition(&mut self, root: &mut egui::Ui, ctx: &egui::Context) {
-        const SECONDS: f32 = 0.32;
-        const TRAVEL: f32 = 26.0;
-        let page = if self.show_home { 0 } else if self.show_studio { 1 } else { 2 };
-        if page != self.page {
-            self.page = page;
-            self.page_changed = Instant::now();
-        }
-        let raw = if self.settings.animations { self.page_changed.elapsed().as_secs_f32() / SECONDS } else { 1.0 };
-        let eased = 1.0 - (1.0 - raw.min(1.0)).powi(3);
-        let shift = (1.0 - eased) * TRAVEL;
-        ctx.set_transform_layer(egui::LayerId::background(), egui::emath::TSTransform::from_translation(Vec2::new(0.0, shift)));
-        if raw < 1.0 {
-            root.multiply_opacity(eased);
-            ctx.request_repaint();
         }
     }
 
@@ -531,7 +509,7 @@ impl App {
 
     fn paint_background(&self, ctx: &egui::Context) {
         let painter = ctx.layer_painter(egui::LayerId::background());
-        let screen = ctx.content_rect().expand(40.0);
+        let screen = ctx.content_rect();
         let [r, g, b] = self.settings.theme.background;
         let alpha = if self.settings.backdrop == settings::Backdrop::None { 255 } else { 110 };
         if let Some((_, texture)) = &self.wallpaper {
@@ -1070,24 +1048,9 @@ impl App {
         egui::Panel::top("menu").show_separator_line(false).frame(bar).show_inside(root, |ui| {
             self.title_drag(ui);
             egui::MenuBar::new().ui(ui, |ui| {
-                                if widgets::head(ui, ph::HOUSE, "Home", false).on_hover_text("Save and go to your projects").clicked() {
-                    self.go_home();
-                }
-                if widgets::head(ui, ph::IMAGES, "Media Pool", self.show_media).clicked() {
-                    self.show_media = !self.show_media;
-                }
-                if widgets::head(ui, ph::SPARKLE, "Effects", self.show_toolbox).clicked() {
-                    self.show_toolbox = !self.show_toolbox;
-                }
-                if widgets::head(ui, ph::WAVEFORM, "Sound Studio", self.show_studio).clicked() {
-                    self.show_studio = !self.show_studio;
-                }
-                if widgets::head(ui, ph::MUSIC_NOTES, "Sound Library", self.show_studio && self.studio_tab == 2).clicked() {
-                    let open = self.show_studio && self.studio_tab == 2;
-                    self.show_studio = !open;
-                    self.studio_tab = 2;
-                }
-                ui.menu_button(format!("{}  Menu", ph::LIST), |ui| {
+                                let accent = self.accent();
+                ui.spacing_mut().item_spacing.x = 3.0;
+                ui.menu_button(RichText::new(ph::LIST).size(17.0), |ui| {
                 ui.menu_button("File", |ui| {
                     let items: [(&str, fn(&mut App)); 7] = [
                         ("New", App::new_project),
@@ -1219,24 +1182,45 @@ impl App {
                     ui.close();
                 }
                 });
+                if widgets::icon_toggle(ui, ph::HOUSE, "Save and go to your projects", false, accent).clicked() {
+                    self.go_home();
+                }
+                ui.add_space(8.0);
+                if let Some(studio) = widgets::segment(ui, &[(false, ph::FILM_STRIP, "Edit"), (true, ph::WAVEFORM, "Sound Studio")], self.show_studio, accent) {
+                    self.show_studio = studio;
+                }
+                ui.add_space(8.0);
+                if widgets::icon_toggle(ui, ph::IMAGES, "Media pool", self.show_media, accent).clicked() {
+                    self.show_media = !self.show_media;
+                }
+                if widgets::icon_toggle(ui, ph::SPARKLE, "Effects and titles", self.show_toolbox, accent).clicked() {
+                    self.show_toolbox = !self.show_toolbox;
+                }
+                if widgets::icon_toggle(ui, ph::MUSIC_NOTES, "Sound library", self.show_studio && self.studio_tab == 2, accent).clicked() {
+                    let open = self.show_studio && self.studio_tab == 2;
+                    self.show_studio = !open;
+                    self.studio_tab = 2;
+                }
                 let name = self.path.as_ref().and_then(|p| p.file_name()).map_or("Untitled".to_string(), |n| n.to_string_lossy().into_owned());
                 let changed = self.project != self.committed;
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     self.window_buttons(ui);
-                    if widgets::head(ui, ph::SLIDERS_HORIZONTAL, "Inspector", self.show_inspector).clicked() {
+                    ui.spacing_mut().item_spacing.x = 3.0;
+                    if widgets::accent_button(ui, "Export", accent).clicked() {
+                        self.show_export = true;
+                    }
+                    ui.add_space(8.0);
+                    if widgets::icon_toggle(ui, ph::SLIDERS_HORIZONTAL, "Inspector", self.show_inspector, accent).clicked() {
                         self.show_inspector = !self.show_inspector;
                     }
-                    if widgets::head(ui, ph::FILE_TEXT, "Metadata", self.show_inspector && self.inspector_tab == 5).clicked() {
+                    if widgets::icon_toggle(ui, ph::FILE_TEXT, "Project details", self.show_inspector && self.inspector_tab == 5, accent).clicked() {
                         self.show_inspector = true;
                         self.inspector_tab = 5;
                     }
-                    if widgets::head(ui, ph::FADERS, "Mixer", self.show_strip).clicked() {
+                    if widgets::icon_toggle(ui, ph::FADERS, "Mixer", self.show_strip, accent).clicked() {
                         self.show_strip = !self.show_strip;
                     }
-                    if widgets::head(ui, ph::EXPORT, "Quick Export", false).clicked() {
-                        self.show_export = true;
-                    }
-                    ui.painter().text(ui.ctx().content_rect().center_top() + Vec2::new(0.0, 18.0), egui::Align2::CENTER_CENTER, if changed { format!("{name}   Edited") } else { name }, egui::FontId::proportional(14.0), Color32::WHITE);
+                    ui.painter().text(ui.ctx().content_rect().center_top() + Vec2::new(0.0, 18.0), egui::Align2::CENTER_CENTER, if changed { format!("{name}  •") } else { name }, egui::FontId::proportional(14.0), Color32::WHITE);
                     if let Ok(update) = self.update_status.lock() {
                         if !update.is_empty() {
                             ui.label(RichText::new(update.as_str()).small().color(self.accent()));
@@ -2308,47 +2292,42 @@ impl App {
         let end = self.project.end_frame().max(1);
         let mut position = self.frame as f32;
         let Some(shown) = shown_rect else { return };
-        let width = (shown.width() - 24.0).clamp(240.0, 620.0);
-        let bar = Rect::from_center_size(Pos2::new(shown.center().x, shown.bottom() - 52.0), Vec2::new(width, 80.0));
+        const BAR_HEIGHT: f32 = 40.0;
+        let bar = Rect::from_min_max(Pos2::new(shown.left(), shown.bottom() - BAR_HEIGHT), shown.max);
         let visible = ui.ctx().animate_bool_with_time(ui.id().with("player-bar"), ui.rect_contains_pointer(shown), 0.16);
         if visible <= 0.0 {
             return;
         }
-        ui.painter().rect_filled(bar, 8.0_f32, Color32::from_black_alpha((190.0 * visible) as u8));
-        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(bar.shrink2(Vec2::new(12.0, 6.0))).layout(egui::Layout::top_down(egui::Align::Min)));
+        ui.painter().rect_filled(bar, 0.0_f32, Color32::from_black_alpha((185.0 * visible) as u8));
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(bar.shrink2(Vec2::new(8.0, 0.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
         child.multiply_opacity(visible);
-        child.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 6.0;
-            ui.add_space((ui.available_width() - 142.0).max(0.0) / 2.0);
-            if widgets::transport(ui, widgets::Glyph::Back, 18.0).on_hover_text("Previous edit (Up)").clicked() {
-                self.jump_edit(false);
+        child.spacing_mut().item_spacing.x = 2.0;
+        if widgets::transport(&mut child, widgets::Glyph::Back, 14.0).on_hover_text("Previous edit (Up)").clicked() {
+            self.jump_edit(false);
+        }
+        if widgets::transport(&mut child, if self.playing { widgets::Glyph::Pause } else { widgets::Glyph::Play }, 18.0).on_hover_text("Play or pause (Space)").clicked() {
+            self.playing = !self.playing;
+        }
+        if widgets::transport(&mut child, widgets::Glyph::Forward, 14.0).on_hover_text("Next edit (Down)").clicked() {
+            self.jump_edit(true);
+        }
+        child.spacing_mut().item_spacing.x = 10.0;
+        child.add_space(8.0);
+        let text = |frame: u32| RichText::new(timecode(frame, fps)).monospace().size(12.0).color(Color32::WHITE);
+        child.label(text(self.frame));
+        let remaining = (child.available_width() - 130.0).max(40.0);
+        child.allocate_ui(Vec2::new(remaining, 18.0), |ui| {
+            ui.set_width(remaining);
+            if widgets::scrubber(ui, &mut position, end as f32, accent) {
+                self.frame = (position as u32).min(self.project.duration - 1);
             }
-            if widgets::transport(ui, if self.playing { widgets::Glyph::Pause } else { widgets::Glyph::Play }, 22.0).on_hover_text("Play or pause (Space)").clicked() {
-                self.playing = !self.playing;
-            }
-            if widgets::transport(ui, widgets::Glyph::Forward, 18.0).on_hover_text("Next edit (Down)").clicked() {
-                self.jump_edit(true);
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let label = if self.player_full { "Exit fullscreen (Esc)" } else { "Fullscreen" };
-                if widgets::head(ui, if self.player_full { ph::CORNERS_IN } else { ph::CORNERS_OUT }, "", self.player_full).on_hover_text(label).clicked() {
-                    self.player_full = !self.player_full;
-                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.player_full));
-                }
-            });
         });
-        child.horizontal(|ui| {
-            let text = |frame: u32| RichText::new(timecode(frame, fps)).monospace().size(12.0).color(Color32::WHITE);
-            ui.label(text(self.frame));
-            let remaining = (ui.available_width() - 92.0).max(40.0);
-            ui.allocate_ui(Vec2::new(remaining, 18.0), |ui| {
-                ui.set_width(remaining);
-                if widgets::scrubber(ui, &mut position, end as f32, accent) {
-                    self.frame = (position as u32).min(self.project.duration - 1);
-                }
-            });
-            ui.label(text(end));
-        });
+        child.label(text(end));
+        let label = if self.player_full { "Exit fullscreen (Esc)" } else { "Fullscreen" };
+        if widgets::head(&mut child, if self.player_full { ph::CORNERS_IN } else { ph::CORNERS_OUT }, "", self.player_full).on_hover_text(label).clicked() {
+            self.player_full = !self.player_full;
+            child.ctx().send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.player_full));
+        }
     }
 
     fn preview_overlay(&mut self, ui: &egui::Ui, picture: &egui::Response) {
@@ -3116,7 +3095,6 @@ impl App {
         }
         self.release_idle_memory(ctx);
         self.sync_wallpaper(ctx);
-        self.page_transition(root, ctx);
         self.paint_background(ctx);
         if self.show_home {
             self.window_edges(ctx);

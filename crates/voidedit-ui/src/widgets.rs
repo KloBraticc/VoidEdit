@@ -164,6 +164,43 @@ pub fn toggle(ui: &mut egui::Ui, value: &mut bool, accent: Color32) -> bool {
     response.clicked()
 }
 
+pub fn icon_toggle(ui: &mut egui::Ui, icon: &str, tip: &str, active: bool, accent: Color32) -> Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(30.0, 28.0), Sense::click());
+    let (hover, press) = motion(ui, &response);
+    let on = ui.ctx().animate_bool_with_time(response.id.with("on"), active, 0.12);
+    let shape = rect.shrink(press);
+    ui.painter().rect_filled(shape, 5.0_f32, Color32::WHITE.gamma_multiply(0.08 * hover));
+    ui.painter().rect_filled(shape, 5.0_f32, accent.gamma_multiply(0.28 * on));
+    paint_icon(ui.painter(), rect.center(), 17.0, icon, mix(mix(IDLE, Color32::WHITE, hover), Color32::WHITE, on));
+    response.on_hover_text(tip)
+}
+
+pub fn segment<T: Copy + PartialEq>(ui: &mut egui::Ui, items: &[(T, &str, &str)], current: T, accent: Color32) -> Option<T> {
+    let mut picked = None;
+    egui::Frame::new().fill(Color32::WHITE.gamma_multiply(0.05)).corner_radius(7).inner_margin(2).show(ui, |ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        ui.horizontal(|ui| {
+            for (value, icon, label) in items {
+                let active = *value == current;
+                let color = if active { Color32::WHITE } else { IDLE };
+                let words = ui.painter().layout_no_wrap((*label).to_string(), egui::FontId::proportional(13.0), color);
+                let (rect, response) = ui.allocate_exact_size(Vec2::new(words.size().x + 38.0, 24.0), Sense::click());
+                let (hover, _) = motion(ui, &response);
+                let on = ui.ctx().animate_bool_with_time(response.id.with("on"), active, 0.12);
+                ui.painter().rect_filled(rect, 5.0_f32, Color32::WHITE.gamma_multiply(0.06 * hover * (1.0 - on)));
+                ui.painter().rect_filled(rect, 5.0_f32, accent.gamma_multiply(on));
+                paint_icon(ui.painter(), rect.left_center() + Vec2::new(15.0, 0.0), 15.0, icon, color);
+                let height = words.size().y;
+                ui.painter().galley(egui::pos2(rect.left() + 28.0, rect.center().y - height / 2.0), words, color);
+                if response.clicked() {
+                    picked = Some(*value);
+                }
+            }
+        });
+    });
+    picked
+}
+
 pub fn setting(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui)) {
     ui.horizontal(|ui| {
         ui.set_min_height(30.0);
