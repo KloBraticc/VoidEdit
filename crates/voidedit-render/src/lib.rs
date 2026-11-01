@@ -1035,7 +1035,7 @@ pub fn upscale(source: &Frame, width: usize, height: usize, sharpen: f32, target
     });
 }
 
-fn render_at(project: &Project, frame: u32, time: f32, scale: f32, target: &mut Frame, images: &dyn Fn(&str) -> Option<Arc<Image>>) {
+pub fn render_at(project: &Project, frame: u32, time: f32, scale: f32, target: &mut Frame, images: &dyn Fn(&str) -> Option<Arc<Image>>) {
     let scale = scale.clamp(0.05, 1.0);
     let width = ((project.width as f32 * scale) as usize).max(1);
     let height = ((project.height as f32 * scale) as usize).max(1);

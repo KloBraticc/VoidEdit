@@ -108,6 +108,7 @@ pub struct App {
     show_strip: bool,
     show_inspector: bool,
     bin: usize,
+    blur_history: Vec<u8>,
     volume_before_mute: f32,
     player_full: bool,
     applied_round: Option<bool>,
@@ -235,6 +236,7 @@ impl App {
             show_strip: true,
             show_inspector: true,
             bin: 0,
+            blur_history: Vec::new(),
             volume_before_mute: 100.0,
             player_full: false,
             applied_round: None,
@@ -359,6 +361,7 @@ impl App {
                 let mut project = Project { width: animation.width & !1, height: animation.height & !1, fps: (animation.fps.round() as u32).clamp(1, 240), duration: frames, ..Project::default() };
                 let mut clip = project.new_clip(Shape::Solid, 0);
                 clip.name = path.file_stem().map_or_else(|| "Animation".to_string(), |stem| stem.to_string_lossy().into_owned());
+                let lottie_path = text.clone();
                 clip.lottie = Some(text);
                 clip.width = project.width as f32;
                 clip.height = project.height as f32;
@@ -371,7 +374,8 @@ impl App {
                 self.selected = None;
                 self.frame = 0;
                 self.show_home = false;
-                self.status = if animation.warnings.is_empty() { "Animation imported".to_string() } else { format!("Imported, but these are not supported: {}", animation.warnings.join(", ")) };
+                let notes = voidedit_render::lottie::warnings(&lottie_path);
+                self.status = if notes.is_empty() { "Animation imported".to_string() } else { format!("Imported with {} notes: {}", notes.len(), notes.join(", ")) };
             }
             Err(error) => self.status = format!("Could not import: {error}"),
         }
@@ -2388,7 +2392,9 @@ impl App {
         let scale = (size.x * pixels / self.project.width as f32 * self.settings.preview_quality).clamp(0.05, 1.0).min(MAX_TEXTURE_SIDE as f32 / largest);
         let time = self.frame;
         let mut found = Vec::new();
-        for moment in self.project.shutter_times(time, true) {
+        let cheap_blur = self.playing && self.project.motion_blur.enabled;
+        let moments = if cheap_blur { vec![time as f32] } else { self.project.shutter_times(time, true) };
+        for moment in moments {
             self.project.wanted_media_at(time, moment, 0, &mut found);
         }
         found.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
@@ -2398,7 +2404,20 @@ impl App {
         let stale = self.rendered.as_ref().is_none_or(|(frame, project, s, g)| *frame != self.frame || *s != scale || *g != generation || *project != self.project);
         if stale {
             let frames = self.frames.clone();
-            render(&self.project, self.frame, scale, &mut self.preview, &|key| frames.latest(key));
+            if cheap_blur {
+                voidedit_render::render_at(&self.project, self.frame, self.frame as f32, scale, &mut self.preview, &|key| frames.latest(key));
+                if self.blur_history.len() == self.preview.pixels.len() {
+                    let keep = (self.project.motion_blur.shutter.min(1.0) * 0.62 * 256.0) as u32;
+                    for (pixel, old) in self.preview.pixels.iter_mut().zip(self.blur_history.iter()) {
+                        *pixel = ((*pixel as u32 * (256 - keep) + *old as u32 * keep) >> 8) as u8;
+                    }
+                }
+                self.blur_history.clear();
+                self.blur_history.extend_from_slice(&self.preview.pixels);
+            } else {
+                self.blur_history.clear();
+                render(&self.project, self.frame, scale, &mut self.preview, &|key| frames.latest(key));
+            }
             let image = egui::ColorImage::from_rgba_unmultiplied([self.preview.width, self.preview.height], &self.preview.pixels);
             self.texture = Some(ui.ctx().load_texture("program", image, egui::TextureOptions::LINEAR));
             self.rendered = Some((self.frame, self.project.clone(), scale, generation));
@@ -2831,13 +2850,17 @@ impl App {
             let glow = ui.ctx().animate_bool_with_time(egui::Id::new(("clip-glow", index)), selected, 0.12);
             let hover = pointer.is_some_and(|p| block.contains(p));
             let lift = ui.ctx().animate_bool_with_time(egui::Id::new(("clip-hover", index)), hover, 0.1);
-            content.rect_filled(block, 2.0_f32, widgets::mix(fill, Color32::WHITE, 0.06 * lift));
-            content.rect_stroke(block, 2.0_f32, Stroke::new(1.0 + glow, Color32::from_gray(20).lerp_to_gamma(accent, glow)), egui::StrokeKind::Inside);
+            let pressed = hover && ui.input(|input| input.pointer.primary_down());
+            let press = ui.ctx().animate_bool_with_time(egui::Id::new(("clip-press", index)), pressed, 0.08);
+            let block = block.shrink2(Vec2::new(0.0, press * 1.5));
+            let fill = widgets::mix(fill, Color32::WHITE, 0.14 * lift);
+            content.rect_filled(block, 2.0_f32, widgets::mix(fill, Color32::BLACK, 0.18 * press));
+            content.rect_stroke(block, 2.0_f32, Stroke::new(1.0 + glow, Color32::from_gray(20 + (150.0 * lift) as u8).lerp_to_gamma(accent, glow)), egui::StrokeKind::Inside);
             let is_video = track.kind == TrackKind::Video;
             let name_bar = Rect::from_min_max(Pos2::new(block.left(), block.bottom() - 18.0), block.max);
             if is_video {
                 content.rect_filled(block, 2.0_f32, Color32::from_gray(26));
-                content.rect_filled(name_bar, 0.0_f32, fill);
+                content.rect_filled(name_bar, 0.0_f32, widgets::mix(fill, Color32::BLACK, 0.18 * press));
             }
             if let (Some(path), Some(waves)) = (&clip.media, &waves) {
                 if let Some(Some(peaks)) = waves.get(path) {

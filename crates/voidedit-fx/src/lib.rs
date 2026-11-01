@@ -1,3 +1,5 @@
+pub mod lottie;
+
 use std::collections::{BTreeMap, HashMap};
 
 use effectcraft_effects::{all, default_value, find, Buf, EffectCtx, EffectEnv, Params};

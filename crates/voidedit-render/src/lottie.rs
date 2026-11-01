@@ -744,6 +744,13 @@ fn pixmap_from(image: &Image) -> Option<Pixmap> {
     Some(pixmap)
 }
 
+pub fn warnings(path: &str) -> Vec<String> {
+    match voidedit_fx::lottie::engine(path) {
+        Ok(engine) => engine.warnings.clone(),
+        Err(error) => vec![format!("the full engine could not load this file, so a simpler player is used: {error}")],
+    }
+}
+
 pub fn frame_image(path: &str, frame: f32, scale: f32) -> Option<Arc<Image>> {
     type Last = Option<(String, u32, u32, Arc<Image>)>;
     static LAST: Mutex<Last> = Mutex::new(None);
@@ -753,7 +760,12 @@ pub fn frame_image(path: &str, frame: f32, scale: f32) -> Option<Arc<Image>> {
             return Some(image.clone());
         }
     }
-    let image = Arc::new(load(path).ok()?.render(frame, scale)?);
+    let start = load(path).ok()?.start;
+    let from_engine = voidedit_fx::lottie::engine(path).ok().and_then(|engine| engine.render(frame + start, scale)).map(|image| Image { width: image.width, height: image.height, pixels: image.pixels });
+    let image = Arc::new(match from_engine {
+        Some(image) => image,
+        None => load(path).ok()?.render(frame, scale)?,
+    });
     if let Ok(mut last) = LAST.lock() {
         *last = Some((path.to_string(), key.0, key.1, image.clone()));
     }

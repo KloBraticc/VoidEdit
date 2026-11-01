@@ -5,6 +5,12 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+effectcraft-lottie = { git = "https://github.com/storytold/effectcraft", rev = "e71dd62" }
+effectcraft-expr = { git = "https://github.com/storytold/effectcraft", rev = "e71dd62" }
+effectcraft-render = { git = "https://github.com/storytold/effectcraft", rev = "e71dd62" }
+effectcraft-time = { git = "https://github.com/storytold/effectcraft", rev = "e71dd62" }
+serde_json.workspace = true
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 voidedit-core.workspace = true
 effectcraft-effects = { git = "https://github.com/storytold/effectcraft", rev = "e71dd62" }
 effectcraft-keyframe = { git = "https://github.com/storytold/effectcraft", rev = "e71dd62" }
