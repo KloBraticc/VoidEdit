@@ -88,14 +88,63 @@ pub enum Effect {
     Brightness { amount: Param },
     Tint { amount: Param, color: [u8; 3] },
     Invert,
+    Grayscale,
+    Sepia,
+    Contrast { amount: Param },
+    Saturation { amount: Param },
+    Exposure { amount: Param },
+    Temperature { amount: Param },
+    Posterize { levels: Param },
+    Vignette { amount: Param },
+    Pixelate { size: Param },
+    Blur { radius: Param },
+    FlipHorizontal,
+    FlipVertical,
 }
 
+pub const EFFECT_NAMES: [&str; 15] = [
+    "Brightness", "Tint", "Invert", "Grayscale", "Sepia", "Contrast", "Saturation", "Exposure", "Temperature", "Posterize", "Vignette", "Pixelate", "Blur", "Flip Horizontal", "Flip Vertical",
+];
+
 impl Effect {
+    pub fn create(name: &str) -> Option<Effect> {
+        Some(match name {
+            "Brightness" => Effect::Brightness { amount: Param::new(0.0) },
+            "Tint" => Effect::Tint { amount: Param::new(50.0), color: [255, 180, 90] },
+            "Invert" => Effect::Invert,
+            "Grayscale" => Effect::Grayscale,
+            "Sepia" => Effect::Sepia,
+            "Contrast" => Effect::Contrast { amount: Param::new(0.0) },
+            "Saturation" => Effect::Saturation { amount: Param::new(0.0) },
+            "Exposure" => Effect::Exposure { amount: Param::new(0.0) },
+            "Temperature" => Effect::Temperature { amount: Param::new(0.0) },
+            "Posterize" => Effect::Posterize { levels: Param::new(6.0) },
+            "Vignette" => Effect::Vignette { amount: Param::new(50.0) },
+            "Pixelate" => Effect::Pixelate { size: Param::new(16.0) },
+            "Blur" => Effect::Blur { radius: Param::new(8.0) },
+            "Flip Horizontal" => Effect::FlipHorizontal,
+            "Flip Vertical" => Effect::FlipVertical,
+            _ => return None,
+        })
+    }
+
     pub fn name(&self) -> &'static str {
         match self {
             Effect::Brightness { .. } => "Brightness",
             Effect::Tint { .. } => "Tint",
             Effect::Invert => "Invert",
+            Effect::Grayscale => "Grayscale",
+            Effect::Sepia => "Sepia",
+            Effect::Contrast { .. } => "Contrast",
+            Effect::Saturation { .. } => "Saturation",
+            Effect::Exposure { .. } => "Exposure",
+            Effect::Temperature { .. } => "Temperature",
+            Effect::Posterize { .. } => "Posterize",
+            Effect::Vignette { .. } => "Vignette",
+            Effect::Pixelate { .. } => "Pixelate",
+            Effect::Blur { .. } => "Blur",
+            Effect::FlipHorizontal => "Flip Horizontal",
+            Effect::FlipVertical => "Flip Vertical",
         }
     }
 }
@@ -120,6 +169,52 @@ pub struct Clip {
     pub opacity: Param,
     pub effects: Vec<Effect>,
     pub visible: bool,
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default = "default_text_size")]
+    pub text_size: f32,
+    #[serde(default)]
+    pub fade_in: u32,
+    #[serde(default)]
+    pub fade_out: u32,
+    #[serde(default = "default_volume")]
+    pub volume: Param,
+    #[serde(default = "default_speed")]
+    pub speed: f32,
+    #[serde(default)]
+    pub reverse: bool,
+}
+
+fn default_text_size() -> f32 {
+    96.0
+}
+
+fn default_volume() -> Param {
+    Param::new(100.0)
+}
+
+fn default_speed() -> f32 {
+    1.0
+}
+
+impl Clip {
+    pub fn fade(&self, frame: f32) -> f32 {
+        let mut value = 1.0f32;
+        if self.fade_in > 0 {
+            value = value.min((frame - self.start as f32) / self.fade_in as f32);
+        }
+        if self.fade_out > 0 {
+            value = value.min((self.end as f32 - frame) / self.fade_out as f32);
+        }
+        value.clamp(0.0, 1.0)
+    }
+
+    pub fn media_seconds(&self, frame: u32, fps: u32) -> f64 {
+        let length = self.end.saturating_sub(self.start) as f64;
+        let elapsed = frame.saturating_sub(self.start) as f64;
+        let position = if self.reverse { (length - 1.0 - elapsed).max(0.0) } else { elapsed };
+        (position * self.speed.max(0.01) as f64 + self.offset as f64) / fps.max(1) as f64
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -132,6 +227,10 @@ pub enum TrackKind {
 pub struct Track {
     pub name: String,
     pub kind: TrackKind,
+    #[serde(default)]
+    pub muted: bool,
+    #[serde(default)]
+    pub locked: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -144,6 +243,8 @@ pub struct Project {
     pub tracks: Vec<Track>,
     pub clips: Vec<Clip>,
     pub media: Vec<String>,
+    #[serde(default)]
+    pub markers: Vec<u32>,
 }
 
 impl Default for Project {
@@ -155,18 +256,89 @@ impl Default for Project {
             duration: 1800,
             background: [0, 0, 0],
             tracks: vec![
-                Track { name: "Audio 1".into(), kind: TrackKind::Audio },
-                Track { name: "Video 1".into(), kind: TrackKind::Video },
-                Track { name: "Video 2".into(), kind: TrackKind::Video },
-                Track { name: "Video 3".into(), kind: TrackKind::Video },
+                Track::new("Audio 1", TrackKind::Audio),
+                Track::new("Video 1", TrackKind::Video),
+                Track::new("Video 2", TrackKind::Video),
+                Track::new("Video 3", TrackKind::Video),
             ],
             clips: Vec::new(),
             media: Vec::new(),
+            markers: Vec::new(),
         }
     }
 }
 
+impl Track {
+    pub fn new(name: &str, kind: TrackKind) -> Self {
+        Self { name: name.into(), kind, muted: false, locked: false }
+    }
+}
+
 impl Project {
+    pub fn new_text(&self, start: u32) -> Clip {
+        let mut clip = self.new_clip(Shape::Rectangle, start);
+        clip.name = "Text".into();
+        clip.text = Some("Your text".into());
+        clip.color = [255, 255, 255];
+        clip
+    }
+
+    pub fn add_track(&mut self, kind: TrackKind) {
+        let count = self.tracks.iter().filter(|track| track.kind == kind).count() + 1;
+        let label = if kind == TrackKind::Video { "Video" } else { "Audio" };
+        let track = Track::new(&format!("{label} {count}"), kind);
+        match kind {
+            TrackKind::Video => self.tracks.push(track),
+            TrackKind::Audio => {
+                self.tracks.insert(0, track);
+                for clip in &mut self.clips {
+                    clip.track += 1;
+                }
+            }
+        }
+    }
+
+    pub fn ripple_delete(&mut self, index: usize) {
+        if index >= self.clips.len() {
+            return;
+        }
+        let removed = self.clips.remove(index);
+        let gap = removed.end - removed.start;
+        for clip in &mut self.clips {
+            if clip.track == removed.track && clip.start >= removed.end {
+                clip.start -= gap;
+                clip.end -= gap;
+            }
+        }
+    }
+
+    pub fn snap(&self, frame: u32, skip: Option<usize>, playhead: u32, reach: u32) -> u32 {
+        let mut best = frame;
+        let mut distance = reach + 1;
+        let mut consider = |point: u32| {
+            let gap = point.abs_diff(frame);
+            if gap < distance {
+                distance = gap;
+                best = point;
+            }
+        };
+        consider(playhead);
+        for (index, clip) in self.clips.iter().enumerate() {
+            if Some(index) != skip {
+                consider(clip.start);
+                consider(clip.end);
+            }
+        }
+        for marker in &self.markers {
+            consider(*marker);
+        }
+        best
+    }
+
+    pub fn end_frame(&self) -> u32 {
+        self.clips.iter().map(|clip| clip.end).max().unwrap_or(0)
+    }
+
     fn track_of(&self, kind: TrackKind) -> usize {
         self.tracks.iter().position(|track| track.kind == kind).unwrap_or(0)
     }
@@ -196,6 +368,13 @@ impl Project {
             opacity: Param::new(100.0),
             effects: Vec::new(),
             visible: true,
+            text: None,
+            text_size: default_text_size(),
+            fade_in: 0,
+            fade_out: 0,
+            volume: default_volume(),
+            speed: 1.0,
+            reverse: false,
         }
     }
 
@@ -250,7 +429,8 @@ impl Project {
         for clip in &mut self.clips {
             clip.track = clip.track.min(last);
             clip.end = clip.end.max(clip.start + 1);
-            for param in [&mut clip.x, &mut clip.y, &mut clip.scale, &mut clip.rotation, &mut clip.opacity] {
+            clip.speed = clip.speed.clamp(0.1, 16.0);
+            for param in [&mut clip.x, &mut clip.y, &mut clip.scale, &mut clip.rotation, &mut clip.opacity, &mut clip.volume] {
                 param.keys.sort_by_key(|key| key.frame);
                 param.keys.dedup_by_key(|key| key.frame);
             }
@@ -342,6 +522,39 @@ mod tests {
         let mut project = Project { fps: 0, ..Project::default() };
         project.sanitize();
         assert_eq!(project.fps, 1);
+    }
+
+    #[test]
+    fn fades_ramp_and_ripple_closes_gaps() {
+        let mut project = Project::default();
+        let mut first = project.new_clip(Shape::Solid, 0);
+        first.end = 10;
+        first.fade_in = 10;
+        assert_eq!(first.fade(5.0), 0.5);
+        let mut second = project.new_clip(Shape::Solid, 10);
+        second.end = 20;
+        project.clips = vec![first, second];
+        project.ripple_delete(0);
+        assert_eq!((project.clips[0].start, project.clips[0].end), (0, 10));
+    }
+
+    #[test]
+    fn snapping_finds_close_points() {
+        let mut project = Project::default();
+        project.clips.push(project.new_clip(Shape::Solid, 100));
+        assert_eq!(project.snap(103, None, 0, 5), 100);
+        assert_eq!(project.snap(120, None, 0, 5), 120);
+    }
+
+    #[test]
+    fn old_project_files_still_load() {
+        let mut project = Project::default();
+        project.clips.push(project.new_clip(Shape::Solid, 0));
+        let mut value: serde_json::Value = serde_json::from_str(&project.to_json().unwrap()).unwrap();
+        value["clips"][0].as_object_mut().unwrap().remove("volume");
+        value.as_object_mut().unwrap().remove("markers");
+        let loaded = Project::from_json(&value.to_string()).unwrap();
+        assert_eq!(loaded.clips[0].volume.base, 100.0);
     }
 
     #[test]

@@ -1,15 +1,23 @@
+mod settings;
+
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke, Vec2};
-use voidedit_core::{timecode, Effect, History, Param, Project, Shape, TrackKind};
-use voidedit_media::{Audio, AudioClip, FrameWant, Frames, Library};
-use voidedit_render::{render, Frame};
+use eframe::egui::{self, Color32, Pos2, Rect, RichText, Sense, Stroke, Vec2};
+use settings::Settings;
+use voidedit_core::{timecode, Clip, Effect, History, Param, Project, Shape, TrackKind, EFFECT_NAMES};
+use voidedit_export::{audio_clips, export, Progress};
+use voidedit_media::{waveform, Audio, FrameWant, Frames, Library};
+use voidedit_render::{render, wanted_frame, Frame};
 
-const HEADER_WIDTH: f32 = 110.0;
-const RULER_HEIGHT: f32 = 26.0;
-const TRACK_HEIGHT: f32 = 62.0;
-const ACCENT: Color32 = Color32::from_rgb(58, 134, 255);
+const HEADER_WIDTH: f32 = 128.0;
+const RULER_HEIGHT: f32 = 28.0;
+const TRACK_HEIGHT: f32 = 64.0;
+const AUTOSAVE_SECONDS: f32 = 60.0;
+const WAVEFORM_POINTS: usize = 800;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Tool {
@@ -17,11 +25,23 @@ enum Tool {
     Razor,
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum LeftTab {
+    Project,
+    Effects,
+}
+
 #[derive(Clone, Copy)]
 enum Drag {
     Move { grab: f32 },
     TrimStart,
     TrimEnd,
+}
+
+struct ExportJob {
+    progress: Arc<Progress>,
+    result: Arc<Mutex<Option<Result<(), String>>>>,
+    started: Instant,
 }
 
 pub struct App {
@@ -32,9 +52,12 @@ pub struct App {
     frame: u32,
     playing: bool,
     last_tick: Instant,
+    last_autosave: Instant,
     remainder: f32,
     selected: Option<usize>,
+    clipboard: Option<Clip>,
     tool: Tool,
+    left: LeftTab,
     drag: Option<(usize, Drag)>,
     zoom: f32,
     scroll: f32,
@@ -48,18 +71,24 @@ pub struct App {
     audio_playing: bool,
     audio_project: Option<Project>,
     meter: f32,
+    waves: Arc<Mutex<HashMap<String, Option<Vec<f32>>>>>,
     status: String,
-    update_status: std::sync::Arc<std::sync::Mutex<String>>,
+    update_status: Arc<Mutex<String>>,
+    settings: Settings,
+    show_settings: bool,
+    job: Option<ExportJob>,
+    context: egui::Context,
 }
 
 impl App {
-    pub fn new(ctx: &egui::Context, update_status: std::sync::Arc<std::sync::Mutex<String>>) -> Self {
+    pub fn new(ctx: &egui::Context, update_status: Arc<Mutex<String>>) -> Self {
         let library = Library::default();
         let repaint = ctx.clone();
         let frames = Frames::new(library.clone(), Box::new(move || repaint.request_repaint()));
         let audio = Audio::new(library.clone());
         let project = Project::default();
-        Self {
+        let settings = Settings::load();
+        let app = Self {
             committed: project.clone(),
             project,
             history: History::default(),
@@ -67,9 +96,12 @@ impl App {
             frame: 0,
             playing: false,
             last_tick: Instant::now(),
+            last_autosave: Instant::now(),
             remainder: 0.0,
             selected: None,
+            clipboard: None,
             tool: Tool::Select,
+            left: LeftTab::Project,
             drag: None,
             zoom: 6.0,
             scroll: 0.0,
@@ -83,9 +115,46 @@ impl App {
             audio_playing: false,
             audio_project: None,
             meter: 0.0,
+            waves: Arc::default(),
             status: String::new(),
             update_status,
-        }
+            settings,
+            show_settings: false,
+            job: None,
+            context: ctx.clone(),
+        };
+        app.apply_style();
+        app
+    }
+
+    fn accent(&self) -> Color32 {
+        let [r, g, b] = self.settings.accent;
+        Color32::from_rgb(r, g, b)
+    }
+
+    fn apply_style(&self) {
+        let ctx = &self.context;
+        ctx.set_zoom_factor(self.settings.ui_scale.clamp(0.6, 2.0));
+        let mut visuals = egui::Visuals::dark();
+        let base = self.settings.panel_gray;
+        visuals.panel_fill = Color32::from_gray(base);
+        visuals.window_fill = Color32::from_gray(base.saturating_add(6));
+        visuals.extreme_bg_color = Color32::from_gray(base.saturating_sub(12));
+        visuals.selection.bg_fill = self.accent();
+        visuals.widgets.hovered.bg_fill = self.accent().gamma_multiply(0.45);
+        visuals.widgets.active.bg_fill = self.accent();
+        visuals.window_corner_radius = 10.into();
+        visuals.menu_corner_radius = 8.into();
+        visuals.widgets.noninteractive.corner_radius = 5.into();
+        visuals.widgets.inactive.corner_radius = 5.into();
+        visuals.widgets.hovered.corner_radius = 5.into();
+        visuals.widgets.active.corner_radius = 5.into();
+        ctx.set_visuals(visuals);
+        ctx.style_mut(|style| {
+            style.animation_time = 0.12;
+            style.spacing.item_spacing = Vec2::new(7.0, 6.0);
+            style.spacing.button_padding = Vec2::new(8.0, 4.0);
+        });
     }
 
     fn undo(&mut self) {
@@ -102,10 +171,22 @@ impl App {
         }
     }
 
+    fn new_project(&mut self) {
+        self.project = Project::default();
+        self.committed = self.project.clone();
+        self.history = History::default();
+        self.path = None;
+        self.selected = None;
+        self.frame = 0;
+    }
+
     fn open(&mut self) {
-        let Some(path) = rfd::FileDialog::new().add_filter("Void Edit project", &["voidedit"]).pick_file() else {
-            return;
-        };
+        if let Some(path) = rfd::FileDialog::new().add_filter("Void Edit project", &["voidedit"]).pick_file() {
+            self.open_path(path);
+        }
+    }
+
+    pub fn open_path(&mut self, path: PathBuf) {
         match std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|t| Project::from_json(&t).map_err(|e| e.to_string())) {
             Ok(project) => {
                 self.project = project;
@@ -114,9 +195,19 @@ impl App {
                 self.path = Some(path);
                 self.selected = None;
                 self.frame = 0;
+                for file in self.project.media.clone() {
+                    self.add_media(file);
+                }
             }
             Err(error) => self.status = format!("Could not open the project: {error}"),
         }
+    }
+
+    fn write_project(&self, path: &std::path::Path) -> Result<(), String> {
+        let temporary = path.with_extension("voidedit.tmp");
+        let text = self.project.to_json().map_err(|e| e.to_string())?;
+        std::fs::write(&temporary, text).map_err(|e| e.to_string())?;
+        std::fs::rename(&temporary, path).map_err(|e| e.to_string())
     }
 
     fn save(&mut self, choose: bool) {
@@ -125,14 +216,7 @@ impl App {
             _ => rfd::FileDialog::new().add_filter("Void Edit project", &["voidedit"]).set_file_name("Untitled.voidedit").save_file(),
         };
         let Some(path) = path else { return };
-        let temporary = path.with_extension("voidedit.tmp");
-        let result = self
-            .project
-            .to_json()
-            .map_err(|e| e.to_string())
-            .and_then(|text| std::fs::write(&temporary, text).map_err(|e| e.to_string()))
-            .and_then(|()| std::fs::rename(&temporary, &path).map_err(|e| e.to_string()));
-        match result {
+        match self.write_project(&path) {
             Ok(()) => {
                 self.status = "Saved".into();
                 self.path = Some(path);
@@ -141,37 +225,162 @@ impl App {
         }
     }
 
+    fn autosave(&mut self) {
+        if self.last_autosave.elapsed().as_secs_f32() < AUTOSAVE_SECONDS {
+            return;
+        }
+        self.last_autosave = Instant::now();
+        if self.project.clips.is_empty() {
+            return;
+        }
+        let target = self.path.as_ref().map(|path| path.with_extension("autosave.voidedit")).or_else(|| Settings::folder().map(|folder| folder.join("autosave.voidedit")));
+        if let Some(target) = target {
+            let _ = self.write_project(&target);
+        }
+    }
+
     fn import(&mut self) {
         if let Some(files) = rfd::FileDialog::new().pick_files() {
             for file in files {
-                let file = file.to_string_lossy().into_owned();
-                if !self.project.media.contains(&file) {
-                    self.project.media.push(file);
-                }
+                self.add_media(file.to_string_lossy().into_owned());
             }
         }
     }
 
-    fn add_clip(&mut self, shape: Shape) {
-        let clip = self.project.new_clip(shape, self.frame);
+    fn add_media(&mut self, file: String) {
+        if !self.project.media.contains(&file) {
+            self.project.media.push(file.clone());
+        }
+        let library = self.library.clone();
+        let waves = self.waves.clone();
+        let repaint = self.context.clone();
+        let _ = std::thread::Builder::new().name("waveform".into()).spawn(move || {
+            let peaks = waveform(&library, &file, WAVEFORM_POINTS);
+            if let Ok(mut waves) = waves.lock() {
+                waves.insert(file, peaks);
+            }
+            repaint.request_repaint();
+        });
+    }
+
+    fn insert_media(&mut self, file: &str) {
+        match self.library.details(file) {
+            Some(details) => {
+                let size = details.has_video.then_some((details.width, details.height));
+                let clip = self.project.new_media_clip(file, self.frame, size, details.seconds);
+                self.push_clip(clip);
+            }
+            None => self.status = "This file could not be opened".into(),
+        }
+    }
+
+    fn push_clip(&mut self, clip: Clip) {
+        self.project.duration = self.project.duration.max(clip.end + self.project.fps);
         self.project.clips.push(clip);
         self.selected = Some(self.project.clips.len() - 1);
     }
 
-    fn delete_selected(&mut self) {
+    fn add_clip(&mut self, shape: Shape) {
+        let clip = self.project.new_clip(shape, self.frame);
+        self.push_clip(clip);
+    }
+
+    fn add_text(&mut self) {
+        let clip = self.project.new_text(self.frame);
+        self.push_clip(clip);
+    }
+
+    fn delete_selected(&mut self, ripple: bool) {
         if let Some(index) = self.selected.take() {
-            if index < self.project.clips.len() {
+            if ripple {
+                self.project.ripple_delete(index);
+            } else if index < self.project.clips.len() {
                 self.project.clips.remove(index);
             }
         }
     }
 
+    fn copy(&mut self) {
+        self.clipboard = self.selected.and_then(|index| self.project.clips.get(index)).cloned();
+    }
+
+    fn paste(&mut self) {
+        if let Some(mut clip) = self.clipboard.clone() {
+            let length = clip.end - clip.start;
+            clip.start = self.frame;
+            clip.end = self.frame + length;
+            self.push_clip(clip);
+        }
+    }
+
+    fn split_at_playhead(&mut self) {
+        let frame = self.frame;
+        for index in 0..self.project.clips.len() {
+            let clip = &self.project.clips[index];
+            if frame > clip.start && frame < clip.end {
+                self.project.split(index, frame);
+            }
+        }
+    }
+
+    fn toggle_marker(&mut self) {
+        match self.project.markers.binary_search(&self.frame) {
+            Ok(index) => {
+                self.project.markers.remove(index);
+            }
+            Err(index) => self.project.markers.insert(index, self.frame),
+        }
+    }
+
+    fn jump_edit(&mut self, forward: bool) {
+        let mut points: Vec<u32> = self.project.clips.iter().flat_map(|clip| [clip.start, clip.end]).chain(self.project.markers.iter().copied()).collect();
+        points.push(0);
+        points.sort_unstable();
+        points.dedup();
+        let next = if forward { points.iter().find(|point| **point > self.frame).copied() } else { points.iter().rev().find(|point| **point < self.frame).copied() };
+        if let Some(next) = next {
+            self.frame = next.min(self.project.duration - 1);
+        }
+    }
+
+    fn start_export(&mut self) {
+        if self.job.is_some() {
+            return;
+        }
+        if self.project.clips.is_empty() {
+            self.status = "Add a clip before exporting".into();
+            return;
+        }
+        let Some(path) = rfd::FileDialog::new().add_filter("MP4 video", &["mp4"]).set_file_name("Export.mp4").save_file() else {
+            return;
+        };
+        let progress = Arc::new(Progress::default());
+        let result = Arc::new(Mutex::new(None));
+        let (project, library, shared, finished, repaint) = (self.project.clone(), self.library.clone(), progress.clone(), result.clone(), self.context.clone());
+        let spawned = std::thread::Builder::new().name("export".into()).spawn(move || {
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| export(&project, &library, &path, &shared))).unwrap_or_else(|_| Err("the export stopped unexpectedly".into()));
+            if let Ok(mut slot) = finished.lock() {
+                *slot = Some(outcome);
+            }
+            repaint.request_repaint();
+        });
+        if spawned.is_ok() {
+            self.job = Some(ExportJob { progress, result, started: Instant::now() });
+        }
+    }
+
     fn input(&mut self, ctx: &egui::Context) {
+        for file in ctx.input(|i| i.raw.dropped_files.clone()) {
+            if let Some(path) = file.path {
+                self.add_media(path.to_string_lossy().into_owned());
+            }
+        }
         if ctx.wants_keyboard_input() {
             return;
         }
         let command = |key| ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, key));
         let shift_command = |key| ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, key));
+        let shift = |key| ctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, key));
         let plain = |key| ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, key));
         if shift_command(egui::Key::Z) {
             self.redo();
@@ -183,11 +392,32 @@ impl App {
         } else if command(egui::Key::S) {
             self.save(false);
         }
+        if command(egui::Key::K) {
+            self.split_at_playhead();
+        }
+        if command(egui::Key::C) {
+            self.copy();
+        }
+        if command(egui::Key::V) {
+            self.paste();
+        }
+        if command(egui::Key::D) {
+            self.copy();
+            self.paste();
+        }
+        if command(egui::Key::I) {
+            self.import();
+        }
+        if command(egui::Key::M) {
+            self.start_export();
+        }
         if plain(egui::Key::Space) {
             self.playing = !self.playing;
         }
-        if plain(egui::Key::Delete) || plain(egui::Key::Backspace) {
-            self.delete_selected();
+        if shift(egui::Key::Delete) {
+            self.delete_selected(true);
+        } else if plain(egui::Key::Delete) || plain(egui::Key::Backspace) {
+            self.delete_selected(false);
         }
         if plain(egui::Key::V) {
             self.tool = Tool::Select;
@@ -195,11 +425,26 @@ impl App {
         if plain(egui::Key::C) {
             self.tool = Tool::Razor;
         }
+        if plain(egui::Key::M) {
+            self.toggle_marker();
+        }
+        if plain(egui::Key::T) {
+            self.add_text();
+        }
         if plain(egui::Key::ArrowLeft) {
             self.frame = self.frame.saturating_sub(1);
         }
         if plain(egui::Key::ArrowRight) {
             self.frame = (self.frame + 1).min(self.project.duration - 1);
+        }
+        if plain(egui::Key::ArrowUp) {
+            self.jump_edit(false);
+        }
+        if plain(egui::Key::ArrowDown) {
+            self.jump_edit(true);
+        }
+        if plain(egui::Key::Home) {
+            self.frame = 0;
         }
     }
 
@@ -215,30 +460,17 @@ impl App {
         let whole = self.remainder as u32;
         self.remainder -= whole as f32;
         self.frame += whole;
-        if self.frame >= self.project.duration {
+        let end = self.project.end_frame().max(1).min(self.project.duration);
+        if self.frame >= end {
             self.frame = 0;
+            self.playing = false;
         }
         ctx.request_repaint();
     }
 
     fn sync_audio(&mut self, ctx: &egui::Context) {
         if self.audio_project.as_ref() != Some(&self.project) {
-            let fps = self.project.fps as f64;
-            let clips = self
-                .project
-                .clips
-                .iter()
-                .filter_map(|clip| {
-                    Some(AudioClip {
-                        path: clip.media.clone()?,
-                        start: clip.start as f64 / fps,
-                        end: clip.end as f64 / fps,
-                        offset: clip.offset as f64 / fps,
-                        gain: 1.0,
-                    })
-                })
-                .collect();
-            self.audio.set_clips(clips);
+            self.audio.set_clips(audio_clips(&self.project));
             self.audio_project = Some(self.project.clone());
         }
         if self.playing != self.audio_playing {
@@ -260,46 +492,43 @@ impl App {
         egui::TopBottomPanel::top("menu").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
-                    if ui.button("New").clicked() {
-                        self.project = Project::default();
-                        self.committed = self.project.clone();
-                        self.history = History::default();
-                        self.path = None;
-                        self.selected = None;
-                        ui.close_menu();
-                    }
-                    if ui.button("Open...").clicked() {
-                        ui.close_menu();
-                        self.open();
-                    }
-                    if ui.button("Save").clicked() {
-                        ui.close_menu();
-                        self.save(false);
-                    }
-                    if ui.button("Save As...").clicked() {
-                        ui.close_menu();
-                        self.save(true);
-                    }
-                    if ui.button("Import Media...").clicked() {
-                        ui.close_menu();
-                        self.import();
+                    let items: [(&str, fn(&mut App)); 6] = [
+                        ("New", App::new_project),
+                        ("Open...", App::open),
+                        ("Save", |app| app.save(false)),
+                        ("Save As...", |app| app.save(true)),
+                        ("Import Media...", App::import),
+                        ("Export Video...", App::start_export),
+                    ];
+                    for (label, action) in items {
+                        if ui.button(label).clicked() {
+                            ui.close_menu();
+                            action(self);
+                        }
                     }
                 });
                 ui.menu_button("Edit", |ui| {
-                    if ui.button("Undo").clicked() {
-                        self.undo();
-                        ui.close_menu();
-                    }
-                    if ui.button("Redo").clicked() {
-                        self.redo();
-                        ui.close_menu();
-                    }
-                    if ui.button("Delete").clicked() {
-                        self.delete_selected();
-                        ui.close_menu();
+                    let items: [(&str, fn(&mut App)); 7] = [
+                        ("Undo", App::undo),
+                        ("Redo", App::redo),
+                        ("Copy", App::copy),
+                        ("Paste", App::paste),
+                        ("Delete", |app| app.delete_selected(false)),
+                        ("Ripple Delete", |app| app.delete_selected(true)),
+                        ("Split at Playhead", App::split_at_playhead),
+                    ];
+                    for (label, action) in items {
+                        if ui.button(label).clicked() {
+                            ui.close_menu();
+                            action(self);
+                        }
                     }
                 });
                 ui.menu_button("Clip", |ui| {
+                    if ui.button("New Text").clicked() {
+                        self.add_text();
+                        ui.close_menu();
+                    }
                     for (label, shape) in [("New Solid", Shape::Solid), ("New Rectangle", Shape::Rectangle), ("New Ellipse", Shape::Ellipse)] {
                         if ui.button(label).clicked() {
                             self.add_clip(shape);
@@ -307,157 +536,311 @@ impl App {
                         }
                     }
                 });
+                ui.menu_button("Sequence", |ui| {
+                    if ui.button("Add Video Track").clicked() {
+                        self.project.add_track(TrackKind::Video);
+                        ui.close_menu();
+                    }
+                    if ui.button("Add Audio Track").clicked() {
+                        self.project.add_track(TrackKind::Audio);
+                        ui.close_menu();
+                    }
+                    if ui.button("Add or Remove Marker").clicked() {
+                        self.toggle_marker();
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.label("Size");
+                        ui.add(egui::DragValue::new(&mut self.project.width).range(16..=7680));
+                        ui.add(egui::DragValue::new(&mut self.project.height).range(16..=4320));
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Frame rate");
+                        ui.add(egui::DragValue::new(&mut self.project.fps).range(1..=240));
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Background");
+                        ui.color_edit_button_srgb(&mut self.project.background);
+                    });
+                });
+                if ui.button("Settings").clicked() {
+                    self.show_settings = true;
+                }
                 let name = self.path.as_ref().and_then(|p| p.file_name()).map_or("Untitled".to_string(), |n| n.to_string_lossy().into_owned());
+                let changed = self.project != self.committed;
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(egui::RichText::new(name).weak());
+                    if ui.add(egui::Button::new(RichText::new("Export").color(Color32::WHITE)).fill(self.accent())).clicked() {
+                        self.start_export();
+                    }
+                    ui.label(RichText::new(if changed { format!("{name} *") } else { name }).weak());
                     if let Ok(update) = self.update_status.lock() {
                         if !update.is_empty() {
-                            ui.label(egui::RichText::new(update.as_str()).small().color(ACCENT));
+                            ui.label(RichText::new(update.as_str()).small().color(self.accent()));
                         }
                     }
                     if !self.status.is_empty() {
-                        ui.label(egui::RichText::new(&self.status).small());
+                        ui.label(RichText::new(&self.status).small());
                     }
                 });
             });
         });
     }
 
-    fn project_panel(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Project");
-        ui.add(egui::TextEdit::singleline(&mut self.search).hint_text("Search").desired_width(f32::INFINITY));
+    fn windows(&mut self, ctx: &egui::Context) {
+        let mut open = self.show_settings;
+        let mut changed = false;
+        egui::Window::new("Settings").open(&mut open).resizable(false).collapsible(false).show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Accent color");
+                changed |= ui.color_edit_button_srgb(&mut self.settings.accent).changed();
+            });
+            changed |= ui.add(egui::Slider::new(&mut self.settings.panel_gray, 15..=70).text("Panel shade")).changed();
+            changed |= ui.add(egui::Slider::new(&mut self.settings.ui_scale, 0.6..=2.0).text("Interface size")).changed();
+            changed |= ui.add(egui::Slider::new(&mut self.settings.preview_quality, 0.25..=1.0).text("Preview quality")).changed();
+            changed |= ui.checkbox(&mut self.settings.snapping, "Snap clips while dragging").changed();
+            if ui.button("Reset").clicked() {
+                self.settings = Settings::default();
+                changed = true;
+            }
+        });
+        self.show_settings = open;
+        if changed {
+            self.settings.save();
+            self.apply_style();
+        }
+        let mut finished = None;
+        if let Some(job) = &self.job {
+            let (done, total) = (job.progress.done.load(Ordering::Relaxed), job.progress.total.load(Ordering::Relaxed).max(1));
+            let elapsed = job.started.elapsed().as_secs_f32();
+            egui::Window::new("Exporting").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO).show(ctx, |ui| {
+                ui.add(egui::ProgressBar::new(done as f32 / total as f32).show_percentage().desired_width(340.0));
+                let rate = done as f32 / elapsed.max(0.01);
+                ui.label(format!("Frame {done} of {total}, {rate:.1} frames per second"));
+                if ui.button("Cancel").clicked() {
+                    job.progress.cancel.store(true, Ordering::Relaxed);
+                }
+            });
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+            if let Ok(mut slot) = job.result.lock() {
+                finished = slot.take();
+            }
+        }
+        if let Some(result) = finished {
+            self.job = None;
+            self.status = match result {
+                Ok(()) => "Export finished".into(),
+                Err(error) => format!("Export failed: {error}"),
+            };
+        }
+    }
+
+    fn tab(&self, ui: &mut egui::Ui, active: bool, label: &str) -> bool {
+        let text = if active { RichText::new(label).strong() } else { RichText::new(label).weak() };
+        let response = ui.add(egui::Label::new(text).sense(Sense::click()));
+        let id = response.id.with("underline");
+        let amount = ui.ctx().animate_bool_with_time(id, active, 0.15);
+        if amount > 0.0 {
+            let rect = response.rect;
+            let center = rect.center().x;
+            let half = rect.width() / 2.0 * amount;
+            ui.painter().line_segment([Pos2::new(center - half, rect.bottom() + 2.0), Pos2::new(center + half, rect.bottom() + 2.0)], Stroke::new(2.0_f32, self.accent()));
+        }
+        response.clicked()
+    }
+
+    fn left_panel(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            if ui.button("Import").clicked() {
-                self.import();
+            if self.tab(ui, self.left == LeftTab::Project, "Project") {
+                self.left = LeftTab::Project;
             }
-            ui.label(egui::RichText::new(format!("{} items", self.project.media.len())).weak());
+            if self.tab(ui, self.left == LeftTab::Effects, "Effects") {
+                self.left = LeftTab::Effects;
+            }
         });
-        ui.separator();
+        ui.add_space(4.0);
+        ui.add(egui::TextEdit::singleline(&mut self.search).hint_text("Search").desired_width(f32::INFINITY));
         let filter = self.search.to_lowercase();
-        let mut add = None;
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            for file in &self.project.media {
-                let name = std::path::Path::new(file).file_name().map_or(file.clone(), |n| n.to_string_lossy().into_owned());
-                if !filter.is_empty() && !name.to_lowercase().contains(&filter) {
-                    continue;
+        match self.left {
+            LeftTab::Project => {
+                ui.horizontal(|ui| {
+                    if ui.button("Import").clicked() {
+                        self.import();
+                    }
+                    if ui.button("Text").clicked() {
+                        self.add_text();
+                    }
+                    ui.label(RichText::new(format!("{} items", self.project.media.len())).weak());
+                });
+                ui.separator();
+                let mut add = None;
+                let mut remove = None;
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    if self.project.media.is_empty() {
+                        ui.add_space(20.0);
+                        ui.vertical_centered(|ui| ui.label(RichText::new("Drop video, audio or image files here").weak()));
+                    }
+                    for file in &self.project.media {
+                        let name = std::path::Path::new(file).file_name().map_or(file.clone(), |n| n.to_string_lossy().into_owned());
+                        if !filter.is_empty() && !name.to_lowercase().contains(&filter) {
+                            continue;
+                        }
+                        let response = ui.selectable_label(false, &name).on_hover_text("Click to add at the playhead");
+                        if response.clicked() {
+                            add = Some(file.clone());
+                        }
+                        response.context_menu(|ui| {
+                            if ui.button("Remove from project").clicked() {
+                                remove = Some(file.clone());
+                                ui.close_menu();
+                            }
+                        });
+                    }
+                });
+                if let Some(file) = add {
+                    self.insert_media(&file);
                 }
-                if ui.selectable_label(false, &name).on_hover_text("Click to add at the playhead").clicked() {
-                    add = Some(file.clone());
+                if let Some(file) = remove {
+                    self.project.media.retain(|item| item != &file);
                 }
             }
-        });
-        if let Some(file) = add {
-            match self.library.details(&file) {
-                Some(details) => {
-                    let size = details.has_video.then_some((details.width, details.height));
-                    let clip = self.project.new_media_clip(&file, self.frame, size, details.seconds);
-                    self.project.duration = self.project.duration.max(clip.end + self.project.fps);
-                    self.project.clips.push(clip);
-                    self.selected = Some(self.project.clips.len() - 1);
-                }
-                None => self.status = "This file could not be opened".into(),
+            LeftTab::Effects => {
+                ui.separator();
+                let selected = self.selected;
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    for name in EFFECT_NAMES {
+                        if !filter.is_empty() && !name.to_lowercase().contains(&filter) {
+                            continue;
+                        }
+                        let response = ui.add_enabled(selected.is_some(), egui::Button::new(name).min_size(Vec2::new(ui.available_width(), 24.0)));
+                        if response.clicked() {
+                            if let (Some(clip), Some(effect)) = (selected.and_then(|index| self.project.clips.get_mut(index)), Effect::create(name)) {
+                                clip.effects.push(effect);
+                            }
+                        }
+                    }
+                    if selected.is_none() {
+                        ui.label(RichText::new("Select a clip to add effects").weak());
+                    }
+                });
             }
         }
     }
 
-    fn param(ui: &mut egui::Ui, label: &str, param: &mut Param, frame: u32, speed: f32) {
+    fn param(ui: &mut egui::Ui, accent: Color32, label: &str, param: &mut Param, frame: u32, speed: f32) {
         ui.horizontal(|ui| {
             let keyed = param.has_key(frame);
-            let color = if keyed { ACCENT } else if param.keys.is_empty() { Color32::GRAY } else { Color32::LIGHT_GRAY };
-            if ui.add(egui::Button::new(egui::RichText::new("\u{25C6}").color(color)).frame(false)).on_hover_text("Add or remove a keyframe here").clicked() {
+            let color = if keyed { accent } else if param.keys.is_empty() { Color32::DARK_GRAY } else { Color32::LIGHT_GRAY };
+            let (rect, response) = ui.allocate_exact_size(Vec2::splat(14.0), Sense::click());
+            let center = rect.center();
+            let size = if response.hovered() { 6.0 } else { 4.5 };
+            ui.painter().add(egui::Shape::convex_polygon(vec![center + Vec2::new(0.0, -size), center + Vec2::new(size, 0.0), center + Vec2::new(0.0, size), center + Vec2::new(-size, 0.0)], color, Stroke::NONE));
+            if response.on_hover_text("Add or remove a keyframe here").clicked() {
                 param.toggle_key(frame);
             }
-            ui.add_sized([72.0, 18.0], egui::Label::new(label));
+            ui.add_sized([86.0, 18.0], egui::Label::new(label));
             let mut value = param.at(frame as f32);
-            if ui.add(egui::DragValue::new(&mut value).speed(speed)).changed() {
+            if ui.add(egui::DragValue::new(&mut value).speed(speed).max_decimals(1)).changed() {
                 param.set(frame, value);
             }
         });
     }
 
     fn controls_panel(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Effect Controls");
+        self.tab(ui, true, "Effect Controls");
+        ui.add_space(4.0);
         ui.separator();
         let frame = self.frame;
+        let accent = self.accent();
         let Some(clip) = self.selected.and_then(|index| self.project.clips.get_mut(index)) else {
-            ui.label(egui::RichText::new("Select a clip").weak());
+            ui.add_space(20.0);
+            ui.vertical_centered(|ui| ui.label(RichText::new("Select a clip").weak()));
             return;
         };
-        ui.text_edit_singleline(&mut clip.name);
+        ui.add(egui::TextEdit::singleline(&mut clip.name).desired_width(f32::INFINITY));
         egui::ScrollArea::vertical().show(ui, |ui| {
+            if let Some(text) = &mut clip.text {
+                egui::CollapsingHeader::new("Text").default_open(true).show(ui, |ui| {
+                    ui.add(egui::TextEdit::multiline(text).desired_rows(2).desired_width(f32::INFINITY));
+                    ui.add(egui::Slider::new(&mut clip.text_size, 8.0..=400.0).text("Size"));
+                });
+            }
             egui::CollapsingHeader::new("Motion").default_open(true).show(ui, |ui| {
-                Self::param(ui, "Position X", &mut clip.x, frame, 1.0);
-                Self::param(ui, "Position Y", &mut clip.y, frame, 1.0);
-                Self::param(ui, "Scale", &mut clip.scale, frame, 0.5);
-                Self::param(ui, "Rotation", &mut clip.rotation, frame, 0.5);
+                Self::param(ui, accent, "Position X", &mut clip.x, frame, 1.0);
+                Self::param(ui, accent, "Position Y", &mut clip.y, frame, 1.0);
+                Self::param(ui, accent, "Scale", &mut clip.scale, frame, 0.5);
+                Self::param(ui, accent, "Rotation", &mut clip.rotation, frame, 0.5);
             });
             egui::CollapsingHeader::new("Opacity").default_open(true).show(ui, |ui| {
-                Self::param(ui, "Opacity", &mut clip.opacity, frame, 0.5);
+                Self::param(ui, accent, "Opacity", &mut clip.opacity, frame, 0.5);
+                ui.horizontal(|ui| {
+                    ui.label("Fade in");
+                    ui.add(egui::DragValue::new(&mut clip.fade_in).suffix(" f"));
+                    ui.label("Fade out");
+                    ui.add(egui::DragValue::new(&mut clip.fade_out).suffix(" f"));
+                });
             });
-            if clip.media.is_none() {
+            if clip.media.is_some() {
+                egui::CollapsingHeader::new("Time and Audio").default_open(true).show(ui, |ui| {
+                    ui.add(egui::Slider::new(&mut clip.speed, 0.1..=16.0).logarithmic(true).text("Speed"));
+                    ui.checkbox(&mut clip.reverse, "Reverse");
+                    let mut volume = clip.volume.base;
+                    if ui.add(egui::Slider::new(&mut volume, 0.0..=200.0).text("Volume")).changed() {
+                        clip.volume.base = volume;
+                    }
+                });
+            } else {
                 ui.horizontal(|ui| {
                     ui.label("Color");
                     ui.color_edit_button_srgb(&mut clip.color);
                 });
             }
-            egui::CollapsingHeader::new("Effects").default_open(true).show(ui, |ui| {
+            egui::CollapsingHeader::new(format!("Effects ({})", clip.effects.len())).default_open(true).show(ui, |ui| {
                 let mut remove = None;
                 for (index, effect) in clip.effects.iter_mut().enumerate() {
                     ui.horizontal(|ui| {
                         ui.strong(effect.name());
-                        if ui.small_button("Remove").clicked() {
-                            remove = Some(index);
-                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("Remove").clicked() {
+                                remove = Some(index);
+                            }
+                        });
                     });
                     match effect {
-                        Effect::Brightness { amount } => Self::param(ui, "Amount", amount, frame, 0.5),
+                        Effect::Brightness { amount } | Effect::Contrast { amount } | Effect::Saturation { amount } | Effect::Exposure { amount } | Effect::Temperature { amount } | Effect::Vignette { amount } => Self::param(ui, accent, "Amount", amount, frame, 0.5),
                         Effect::Tint { amount, color } => {
-                            Self::param(ui, "Amount", amount, frame, 0.5);
+                            Self::param(ui, accent, "Amount", amount, frame, 0.5);
                             ui.color_edit_button_srgb(color);
                         }
-                        Effect::Invert => {}
+                        Effect::Posterize { levels } => Self::param(ui, accent, "Levels", levels, frame, 0.1),
+                        Effect::Pixelate { size } => Self::param(ui, accent, "Size", size, frame, 0.25),
+                        Effect::Blur { radius } => Self::param(ui, accent, "Radius", radius, frame, 0.25),
+                        Effect::Invert | Effect::Grayscale | Effect::Sepia | Effect::FlipHorizontal | Effect::FlipVertical => {}
                     }
                 }
                 if let Some(index) = remove {
                     clip.effects.remove(index);
                 }
-                ui.menu_button("Add Effect", |ui| {
-                    if ui.button("Brightness").clicked() {
-                        clip.effects.push(Effect::Brightness { amount: Param::new(0.0) });
-                        ui.close_menu();
-                    }
-                    if ui.button("Tint").clicked() {
-                        clip.effects.push(Effect::Tint { amount: Param::new(50.0), color: [255, 180, 90] });
-                        ui.close_menu();
-                    }
-                    if ui.button("Invert").clicked() {
-                        clip.effects.push(Effect::Invert);
-                        ui.close_menu();
-                    }
-                });
             });
         });
     }
 
     fn monitor(&mut self, ui: &mut egui::Ui) {
-        ui.label(egui::RichText::new("Program").strong());
-        let controls = 54.0;
+        self.tab(ui, true, "Program");
+        let controls = 60.0;
         let area = Vec2::new(ui.available_width(), (ui.available_height() - controls).max(40.0));
         let aspect = self.project.width as f32 / self.project.height as f32;
         let size = if area.x / area.y > aspect { Vec2::new(area.y * aspect, area.y) } else { Vec2::new(area.x, area.x / aspect) };
         let pixels = ui.ctx().pixels_per_point();
-        let scale = (size.x * pixels / self.project.width as f32).clamp(0.05, 1.0);
-        let fps = self.project.fps as f64;
+        let scale = (size.x * pixels / self.project.width as f32 * self.settings.preview_quality).clamp(0.05, 1.0);
+        let fps = self.project.fps;
         let time = self.frame;
         let wants: Vec<FrameWant> = self
             .project
             .clips
             .iter()
-            .filter(|clip| clip.visible && time >= clip.start && time < clip.end && self.project.tracks.get(clip.track).is_some_and(|track| track.kind == TrackKind::Video))
-            .filter_map(|clip| {
-                let path = clip.media.clone()?;
-                Some(FrameWant { path, seconds: (time - clip.start + clip.offset) as f64 / fps, scale })
-            })
+            .filter(|clip| wanted_frame(&self.project, clip, time))
+            .filter_map(|clip| Some(FrameWant { path: clip.media.clone()?, seconds: clip.media_seconds(time, fps), scale }))
             .collect();
         self.frames.want(wants);
         let generation = self.frames.generation();
@@ -474,103 +857,175 @@ impl App {
         }
         ui.allocate_ui_with_layout(area, egui::Layout::centered_and_justified(egui::Direction::TopDown), |ui| {
             if let Some(texture) = &self.texture {
-                ui.add(egui::Image::new((texture.id(), size)).fit_to_exact_size(size));
+                ui.add(egui::Image::new((texture.id(), size)).fit_to_exact_size(size).corner_radius(4));
             }
         });
+        let accent = self.accent();
+        let end = self.project.end_frame().max(1);
+        let mut position = self.frame as f32;
+        ui.spacing_mut().slider_width = ui.available_width() - 8.0;
+        if ui.add(egui::Slider::new(&mut position, 0.0..=(end as f32)).show_value(false)).changed() {
+            self.frame = (position as u32).min(self.project.duration - 1);
+        }
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new(timecode(self.frame, self.project.fps)).color(ACCENT).monospace().size(15.0));
-            ui.add_space((ui.available_width() / 2.0 - 90.0).max(0.0));
-            if ui.button("|<").on_hover_text("Go to start").clicked() {
-                self.frame = 0;
+            ui.label(RichText::new(timecode(self.frame, fps)).color(accent).monospace().size(15.0));
+            ui.add_space((ui.available_width() / 2.0 - 110.0).max(0.0));
+            if ui.button("|<").on_hover_text("Previous edit (Up)").clicked() {
+                self.jump_edit(false);
             }
-            if ui.button("<").clicked() {
+            if ui.button("<").on_hover_text("Back one frame (Left)").clicked() {
                 self.frame = self.frame.saturating_sub(1);
             }
-            if ui.button(if self.playing { "Pause" } else { "Play" }).clicked() {
+            if ui.add(egui::Button::new(if self.playing { "Pause" } else { "Play" }).min_size(Vec2::new(64.0, 0.0))).on_hover_text("Space").clicked() {
                 self.playing = !self.playing;
             }
-            if ui.button(">").clicked() {
+            if ui.button(">").on_hover_text("Forward one frame (Right)").clicked() {
                 self.frame = (self.frame + 1).min(self.project.duration - 1);
             }
-            if ui.button(">|").on_hover_text("Go to end").clicked() {
-                self.frame = self.project.duration - 1;
+            if ui.button(">|").on_hover_text("Next edit (Down)").clicked() {
+                self.jump_edit(true);
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(egui::RichText::new(timecode(self.project.duration, self.project.fps)).monospace());
+                ui.label(RichText::new(timecode(end, fps)).monospace());
             });
         });
     }
 
     fn tools(&mut self, ui: &mut egui::Ui) {
         ui.vertical(|ui| {
+            ui.set_width(58.0);
             for (label, tool, tip) in [("Select", Tool::Select, "Selection (V)"), ("Razor", Tool::Razor, "Razor (C)")] {
                 if ui.selectable_label(self.tool == tool, label).on_hover_text(tip).clicked() {
                     self.tool = tool;
                 }
             }
+            if ui.button("Text").on_hover_text("New text (T)").clicked() {
+                self.add_text();
+            }
+            if ui.button("Marker").on_hover_text("Marker (M)").clicked() {
+                self.toggle_marker();
+            }
+            ui.separator();
+            ui.label(RichText::new("Zoom").small().weak());
+            ui.spacing_mut().slider_width = 50.0;
+            ui.add(egui::Slider::new(&mut self.zoom, 0.2..=60.0).logarithmic(true).show_value(false));
         });
     }
 
     fn timeline(&mut self, ui: &mut egui::Ui) {
         let (response, painter) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
         let rect = response.rect;
-        painter.rect_filled(rect, 0.0_f32, Color32::from_gray(26));
+        painter.rect_filled(rect, 4.0_f32, Color32::from_gray(self.settings.panel_gray.saturating_sub(8)));
+        let accent = self.accent();
         let zoom = self.zoom;
         let lane = rect.left() + HEADER_WIDTH;
-        let to_x = |frame: f32, scroll: f32| lane + (frame - scroll) * zoom;
         if response.hovered() {
-            let (scroll_y, modifiers) = ui.input(|i| (i.smooth_scroll_delta.y, i.modifiers));
-            if modifiers.command {
-                self.zoom = (self.zoom * (1.0 + scroll_y * 0.002)).clamp(0.2, 60.0);
+            let (delta, modifiers, pointer) = ui.input(|i| (i.smooth_scroll_delta, i.modifiers, i.pointer.hover_pos()));
+            if modifiers.command && delta.y != 0.0 {
+                let anchor = pointer.map_or(0.0, |p| (p.x - lane) / self.zoom + self.scroll);
+                self.zoom = (self.zoom * (1.0 + delta.y * 0.003)).clamp(0.2, 60.0);
+                if let Some(p) = pointer {
+                    self.scroll = (anchor - (p.x - lane) / self.zoom).max(0.0);
+                }
             } else {
-                self.scroll = (self.scroll - scroll_y / self.zoom).max(0.0);
+                self.scroll = (self.scroll - (delta.y + delta.x) / self.zoom).max(0.0);
             }
         }
+        let zoom = if zoom != self.zoom { self.zoom } else { zoom };
         let scroll = self.scroll;
-        let step = [1u32, 5, 10, 30, 60, 150, 300, 600, 1800, 3600].into_iter().find(|s| *s as f32 * zoom >= 70.0).unwrap_or(7200);
+        let to_x = |frame: f32| lane + (frame - scroll) * zoom;
+        let content = painter.with_clip_rect(Rect::from_min_max(Pos2::new(lane, rect.top()), rect.max));
+        let step = [1u32, 5, 10, 30, 60, 150, 300, 600, 1800, 3600, 18000].into_iter().find(|s| *s as f32 * zoom >= 80.0).unwrap_or(36000);
         let visible_end = scroll + (rect.right() - lane) / zoom;
         let mut tick = (scroll as u32 / step) * step;
         while (tick as f32) < visible_end {
-            let x = to_x(tick as f32, scroll);
-            if x >= lane {
-                painter.line_segment([Pos2::new(x, rect.top() + 16.0), Pos2::new(x, rect.top() + RULER_HEIGHT)], Stroke::new(1.0_f32, Color32::GRAY));
-                painter.text(Pos2::new(x + 3.0, rect.top() + 2.0), egui::Align2::LEFT_TOP, timecode(tick, self.project.fps), egui::FontId::proportional(10.0), Color32::LIGHT_GRAY);
-            }
+            let x = to_x(tick as f32);
+            content.line_segment([Pos2::new(x, rect.top() + 18.0), Pos2::new(x, rect.top() + RULER_HEIGHT)], Stroke::new(1.0_f32, Color32::GRAY));
+            content.text(Pos2::new(x + 3.0, rect.top() + 3.0), egui::Align2::LEFT_TOP, timecode(tick, self.project.fps), egui::FontId::proportional(10.0), Color32::LIGHT_GRAY);
             tick += step;
         }
         let order: Vec<usize> = (0..self.project.tracks.len()).rev().collect();
         let row_of = |track: usize| order.iter().position(|t| *t == track).unwrap_or(0);
         let row_rect = |row: usize| Rect::from_min_size(Pos2::new(rect.left(), rect.top() + RULER_HEIGHT + row as f32 * TRACK_HEIGHT), Vec2::new(rect.width(), TRACK_HEIGHT - 1.0));
+        let pointer = response.interact_pointer_pos().or(response.hover_pos());
+        let mut header_click = None;
         for (row, track) in order.iter().enumerate() {
             let line = row_rect(row);
             let data = &self.project.tracks[*track];
-            painter.rect_filled(line, 0.0_f32, Color32::from_gray(32));
-            painter.rect_filled(Rect::from_min_size(line.min, Vec2::new(HEADER_WIDTH - 2.0, line.height())), 0.0_f32, Color32::from_gray(44));
-            painter.text(line.min + Vec2::new(10.0, 22.0), egui::Align2::LEFT_TOP, &data.name, egui::FontId::proportional(13.0), Color32::WHITE);
+            painter.rect_filled(line, 0.0_f32, Color32::from_gray(self.settings.panel_gray.saturating_add(2)));
+            let header = Rect::from_min_size(line.min, Vec2::new(HEADER_WIDTH - 2.0, line.height()));
+            painter.rect_filled(header, 0.0_f32, Color32::from_gray(self.settings.panel_gray.saturating_add(14)));
+            painter.text(line.min + Vec2::new(10.0, 8.0), egui::Align2::LEFT_TOP, &data.name, egui::FontId::proportional(13.0), Color32::WHITE);
+            let mute = Rect::from_min_size(line.min + Vec2::new(10.0, 32.0), Vec2::splat(22.0));
+            let lock = Rect::from_min_size(line.min + Vec2::new(38.0, 32.0), Vec2::splat(22.0));
+            for (button, on, text) in [(mute, data.muted, "M"), (lock, data.locked, "L")] {
+                painter.rect_filled(button, 4.0_f32, if on { accent } else { Color32::from_gray(70) });
+                painter.text(button.center(), egui::Align2::CENTER_CENTER, text, egui::FontId::proportional(11.0), Color32::WHITE);
+            }
+            if response.clicked() {
+                if let Some(p) = pointer {
+                    if mute.contains(p) {
+                        header_click = Some((*track, true));
+                    } else if lock.contains(p) {
+                        header_click = Some((*track, false));
+                    }
+                }
+            }
         }
-        let pointer = response.interact_pointer_pos().or(response.hover_pos());
+        if let Some((track, is_mute)) = header_click {
+            let data = &mut self.project.tracks[track];
+            if is_mute {
+                data.muted = !data.muted;
+            } else {
+                data.locked = !data.locked;
+            }
+        }
         let mut hit = None;
+        let waves = self.waves.lock().ok();
         for (index, clip) in self.project.clips.iter().enumerate() {
             let row = row_rect(row_of(clip.track));
-            let left = to_x(clip.start as f32, scroll).max(lane);
-            let right = to_x(clip.end as f32, scroll);
-            if right <= lane {
+            let left = to_x(clip.start as f32);
+            let right = to_x(clip.end as f32);
+            if right <= lane || left >= rect.right() {
                 continue;
             }
             let block = Rect::from_min_max(Pos2::new(left, row.top() + 2.0), Pos2::new(right, row.bottom() - 2.0));
-            let kind = self.project.tracks[clip.track].kind;
-            let fill = match kind {
-                TrackKind::Video => Color32::from_rgb(28, 62, 110),
+            let track = &self.project.tracks[clip.track];
+            let fill = match track.kind {
+                TrackKind::Video if clip.text.is_some() => Color32::from_rgb(120, 70, 150),
+                TrackKind::Video => Color32::from_rgb(30, 70, 125),
                 TrackKind::Audio => Color32::from_rgb(20, 110, 60),
             };
             let selected = self.selected == Some(index);
-            let id = egui::Id::new(("clip-glow", index));
-            let glow = ui.ctx().animate_bool_with_time(id, selected, 0.12);
-            painter.rect_filled(block, 3.0_f32, fill.gamma_multiply(0.8 + glow * 0.4));
-            painter.rect_stroke(block, 3.0_f32, Stroke::new(1.0 + glow, Color32::from_gray(90).lerp_to_gamma(Color32::WHITE, glow)), egui::StrokeKind::Inside);
-            painter.with_clip_rect(block).text(block.min + Vec2::new(6.0, 4.0), egui::Align2::LEFT_TOP, &clip.name, egui::FontId::proportional(11.0), Color32::WHITE);
-            if pointer.is_some_and(|p| block.contains(p)) {
-                let p = pointer.unwrap_or_default();
+            let glow = ui.ctx().animate_bool_with_time(egui::Id::new(("clip-glow", index)), selected, 0.12);
+            let hover = pointer.is_some_and(|p| block.contains(p));
+            let lift = ui.ctx().animate_bool_with_time(egui::Id::new(("clip-hover", index)), hover, 0.1);
+            content.rect_filled(block, 4.0_f32, fill.gamma_multiply(0.8 + 0.15 * lift + glow * 0.25));
+            content.rect_stroke(block, 4.0_f32, Stroke::new(1.0 + glow, Color32::from_gray(90).lerp_to_gamma(Color32::WHITE, glow)), egui::StrokeKind::Inside);
+            if let (Some(path), Some(waves)) = (&clip.media, &waves) {
+                if let Some(Some(peaks)) = waves.get(path) {
+                    let middle = block.center().y + 8.0;
+                    let width = block.width().max(1.0);
+                    let color = Color32::from_white_alpha(70);
+                    let mut x = block.left().max(lane);
+                    while x < block.right().min(rect.right()) {
+                        let position = ((x - block.left()) / width * peaks.len() as f32) as usize;
+                        let height = peaks.get(position).copied().unwrap_or(0.0).min(1.0) * 16.0;
+                        content.line_segment([Pos2::new(x, middle - height), Pos2::new(x, middle + height)], Stroke::new(1.0_f32, color));
+                        x += 2.0;
+                    }
+                }
+            }
+            if clip.fade_in > 0 {
+                let x = to_x((clip.start + clip.fade_in) as f32);
+                content.line_segment([block.left_bottom(), Pos2::new(x, block.top())], Stroke::new(1.0_f32, Color32::WHITE));
+            }
+            if clip.fade_out > 0 {
+                let x = to_x((clip.end - clip.fade_out.min(clip.end - clip.start)) as f32);
+                content.line_segment([Pos2::new(x, block.top()), block.right_bottom()], Stroke::new(1.0_f32, Color32::WHITE));
+            }
+            content.with_clip_rect(block.intersect(content.clip_rect())).text(block.min + Vec2::new(6.0, 4.0), egui::Align2::LEFT_TOP, &clip.name, egui::FontId::proportional(11.0), Color32::WHITE);
+            if let Some(p) = pointer.filter(|p| block.contains(*p) && p.x >= lane) {
                 let mode = if p.x - block.left() < 7.0 {
                     Drag::TrimStart
                 } else if block.right() - p.x < 7.0 {
@@ -581,17 +1036,27 @@ impl App {
                 hit = Some((index, mode));
             }
         }
+        drop(waves);
+        if let Some((_, mode)) = hit {
+            if self.tool == Tool::Razor {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+            } else if matches!(mode, Drag::TrimStart | Drag::TrimEnd) {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+            }
+        }
         if let Some(pos) = pointer {
-            let time = (((pos.x - lane) / zoom + scroll).max(0.0)).min(self.project.duration as f32 - 1.0);
-            if response.drag_started() || response.clicked() {
-                if pos.y < rect.top() + RULER_HEIGHT {
+            let time = ((pos.x - lane) / zoom + scroll).clamp(0.0, self.project.duration as f32 - 1.0);
+            let in_ruler = pos.y < rect.top() + RULER_HEIGHT;
+            if (response.drag_started() || response.clicked()) && pos.x >= lane {
+                if in_ruler {
                     self.frame = time as u32;
                 } else if let Some((index, mode)) = hit {
-                    if self.tool == Tool::Razor {
+                    let locked = self.project.tracks[self.project.clips[index].track].locked;
+                    if self.tool == Tool::Razor && !locked {
                         self.project.split(index, time as u32);
                     } else {
                         self.selected = Some(index);
-                        self.drag = response.drag_started().then_some((index, mode));
+                        self.drag = (response.drag_started() && !locked).then_some((index, mode));
                     }
                 } else if response.clicked() {
                     self.selected = None;
@@ -601,15 +1066,20 @@ impl App {
                 if let Some((index, mode)) = self.drag {
                     let row = ((pos.y - rect.top() - RULER_HEIGHT) / TRACK_HEIGHT).max(0.0) as usize;
                     let target = order.get(row).copied();
-                    let frames = time as u32;
+                    let reach = if self.settings.snapping { (8.0 / zoom) as u32 + 1 } else { 0 };
+                    let frames = self.project.snap(time as u32, Some(index), self.frame, reach);
+                    let snap_start = self.project.clone();
                     if let Some(clip) = self.project.clips.get_mut(index) {
                         match mode {
                             Drag::Move { grab } => {
                                 let length = clip.end - clip.start;
-                                clip.start = (time - grab).max(0.0) as u32;
-                                clip.end = clip.start + length;
+                                let wanted = (time - grab).max(0.0) as u32;
+                                let start = snap_start.snap(wanted, Some(index), self.frame, reach);
+                                clip.start = start;
+                                clip.end = start + length;
                                 if let Some(target) = target {
-                                    if self.project.tracks[target].kind == self.project.tracks[clip.track].kind {
+                                    let tracks = &snap_start.tracks;
+                                    if tracks[target].kind == tracks[clip.track].kind && !tracks[target].locked {
                                         clip.track = target;
                                     }
                                 }
@@ -619,10 +1089,10 @@ impl App {
                                 clip.offset = (clip.offset as i64 + start as i64 - clip.start as i64).max(0) as u32;
                                 clip.start = start;
                             }
-                            Drag::TrimEnd => clip.end = (frames + 1).max(clip.start + 1),
+                            Drag::TrimEnd => clip.end = frames.max(clip.start + 1),
                         }
                     }
-                } else if pos.y < rect.top() + RULER_HEIGHT {
+                } else if in_ruler {
                     self.frame = time as u32;
                 }
             }
@@ -630,10 +1100,13 @@ impl App {
         if response.drag_stopped() {
             self.drag = None;
         }
-        let head = to_x(self.frame as f32, scroll);
-        if head >= lane {
-            painter.line_segment([Pos2::new(head, rect.top()), Pos2::new(head, rect.bottom())], Stroke::new(1.5_f32, ACCENT));
+        for marker in &self.project.markers {
+            let x = to_x(*marker as f32);
+            content.line_segment([Pos2::new(x, rect.top() + RULER_HEIGHT - 8.0), Pos2::new(x, rect.top() + RULER_HEIGHT)], Stroke::new(3.0_f32, Color32::from_rgb(90, 200, 120)));
         }
+        let head = to_x(self.frame as f32);
+        content.line_segment([Pos2::new(head, rect.top()), Pos2::new(head, rect.bottom())], Stroke::new(1.5_f32, accent));
+        content.circle_filled(Pos2::new(head, rect.top() + 6.0), 5.0, accent);
     }
 }
 
@@ -642,34 +1115,27 @@ impl eframe::App for App {
         self.input(ctx);
         self.tick(ctx);
         self.sync_audio(ctx);
+        self.autosave();
         self.menu(ctx);
-        egui::TopBottomPanel::bottom("timeline").resizable(true).default_height(320.0).min_height(120.0).show(ctx, |ui| {
+        self.windows(ctx);
+        egui::TopBottomPanel::bottom("timeline").resizable(true).default_height(330.0).min_height(120.0).show(ctx, |ui| {
             ui.horizontal_top(|ui| {
                 self.tools(ui);
-                ui.separator();
                 let meter = Vec2::new(16.0, ui.available_height());
                 let timeline = Vec2::new((ui.available_width() - meter.x - 8.0).max(50.0), ui.available_height());
                 ui.allocate_ui(timeline, |ui| self.timeline(ui));
                 let (bar, painter) = ui.allocate_painter(meter, Sense::hover());
-                painter.rect_filled(bar.rect, 2.0_f32, Color32::from_gray(20));
+                painter.rect_filled(bar.rect, 3.0_f32, Color32::from_gray(18));
                 let level = Rect::from_min_max(Pos2::new(bar.rect.left(), bar.rect.bottom() - bar.rect.height() * self.meter), bar.rect.max);
-                painter.rect_filled(level, 2.0_f32, Color32::from_rgb(70, 210, 110));
+                painter.rect_filled(level, 3.0_f32, Color32::from_rgb(70, 210, 110));
             });
         });
-        egui::SidePanel::left("project").resizable(true).default_width(300.0).show(ctx, |ui| self.project_panel(ui));
-        egui::SidePanel::right("controls").resizable(true).default_width(320.0).show(ctx, |ui| self.controls_panel(ui));
+        egui::SidePanel::left("project").resizable(true).default_width(290.0).show(ctx, |ui| self.left_panel(ui));
+        egui::SidePanel::right("controls").resizable(true).default_width(330.0).show(ctx, |ui| self.controls_panel(ui));
         egui::CentralPanel::default().show(ctx, |ui| self.monitor(ui));
         if !ctx.input(|i| i.pointer.any_down()) && self.project != self.committed {
             let before = std::mem::replace(&mut self.committed, self.project.clone());
             self.history.record(before);
         }
     }
-}
-
-pub fn style(ctx: &egui::Context) {
-    let mut visuals = egui::Visuals::dark();
-    visuals.panel_fill = Color32::from_gray(30);
-    visuals.window_fill = Color32::from_gray(34);
-    visuals.selection.bg_fill = ACCENT;
-    ctx.set_visuals(visuals);
 }

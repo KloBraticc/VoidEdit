@@ -31,8 +31,11 @@ fn main() -> eframe::Result {
         "Void Edit",
         options,
         Box::new(move |context| {
-            voidedit_ui::style(&context.egui_ctx);
-            Ok(Box::new(voidedit_ui::App::new(&context.egui_ctx, status)))
+            let mut app = voidedit_ui::App::new(&context.egui_ctx, status);
+            if let Some(path) = std::env::args_os().nth(1) {
+                app.open_path(path.into());
+            }
+            Ok(Box::new(app))
         }),
     )
 }

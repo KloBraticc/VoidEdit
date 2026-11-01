@@ -129,6 +129,28 @@ impl Frames {
     }
 }
 
+pub fn decode_now(library: &Library, want: &FrameWant) -> Option<Arc<Image>> {
+    decode(&library.source(&want.path)?, want)
+}
+
+pub fn waveform(library: &Library, path: &str, points: usize) -> Option<Vec<f32>> {
+    let source = library.source(path)?;
+    let info = source.info();
+    info.audio()?;
+    let rate = 8_000u32;
+    let total = (info.duration.0 as f64 / filmcraft_time::TICKS_PER_SECOND as f64 * rate as f64) as usize;
+    let step = (total / points.max(1)).max(1);
+    let mut peaks = Vec::with_capacity(points);
+    let mut start = 0usize;
+    while start < total && peaks.len() < points {
+        let frames = step.min(400);
+        let buffer = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| source.audio(start as i64, frames, rate))).ok()?.ok()?;
+        peaks.push(buffer.channels.iter().flat_map(|channel| channel.iter()).fold(0.0f32, |peak, sample| peak.max(sample.abs())));
+        start += step;
+    }
+    Some(peaks)
+}
+
 fn decode(source: &SharedSource, want: &FrameWant) -> Option<Arc<Image>> {
     let request = FrameRequest { time: Tick::from_seconds_f64(want.seconds), scale: want.scale };
     let frame = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| source.video_frame(request))).ok()?.ok()?;
@@ -142,7 +164,29 @@ pub struct AudioClip {
     pub start: f64,
     pub end: f64,
     pub offset: f64,
-    pub gain: f32,
+    pub gain: Gain,
+}
+
+#[derive(Clone)]
+pub struct Gain {
+    pub level: f32,
+    pub start: f64,
+    pub end: f64,
+    pub fade_in: f64,
+    pub fade_out: f64,
+}
+
+impl Gain {
+    pub fn at(&self, time: f64) -> f32 {
+        let mut fade = 1.0f64;
+        if self.fade_in > 0.0 {
+            fade = fade.min((time - self.start) / self.fade_in);
+        }
+        if self.fade_out > 0.0 {
+            fade = fade.min((self.end - time) / self.fade_out);
+        }
+        self.level * fade.clamp(0.0, 1.0) as f32
+    }
 }
 
 #[derive(Clone)]
@@ -241,7 +285,7 @@ impl Audio {
     }
 }
 
-fn mix(library: &Library, clips: &[AudioClip], start: i64, frames: usize, rate: u32) -> Vec<f32> {
+pub fn mix(library: &Library, clips: &[AudioClip], start: i64, frames: usize, rate: u32) -> Vec<f32> {
     let mut mixed = vec![0.0f32; frames * 2];
     let time = start as f64 / rate as f64;
     let length = frames as f64 / rate as f64;
@@ -260,8 +304,9 @@ fn mix(library: &Library, clips: &[AudioClip], start: i64, frames: usize, rate: 
         let right = buffer.channels.get(1).or(left);
         if let (Some(left), Some(right)) = (left, right) {
             for index in 0..frames.min(left.len()).min(right.len()) {
-                mixed[index * 2] += left[index] * clip.gain;
-                mixed[index * 2 + 1] += right[index] * clip.gain;
+                let gain = clip.gain.at(time + index as f64 / rate as f64);
+                mixed[index * 2] += left[index] * gain;
+                mixed[index * 2 + 1] += right[index] * gain;
             }
         }
     }

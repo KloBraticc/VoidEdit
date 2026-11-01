@@ -1,9 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["crates/voidedit-core", "crates/voidedit-render", "crates/voidedit-ui", "crates/voidedit-media", "crates/voidedit-update", "apps/voidedit"]
+members = ["crates/voidedit-core", "crates/voidedit-render", "crates/voidedit-ui", "crates/voidedit-media", "crates/voidedit-export", "crates/voidedit-update", "apps/voidedit"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/KloBraticc/VoidEdit"
@@ -12,6 +12,7 @@ repository = "https://github.com/KloBraticc/VoidEdit"
 voidedit-core = { path = "crates/voidedit-core" }
 voidedit-render = { path = "crates/voidedit-render" }
 voidedit-media = { path = "crates/voidedit-media" }
+voidedit-export = { path = "crates/voidedit-export" }
 voidedit-ui = { path = "crates/voidedit-ui" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -21,8 +22,9 @@ rfd = "0.15"
 
 [profile.release]
 opt-level = 3
-lto = "fat"
-codegen-units = 1
+lto = false
+codegen-units = 16
+incremental = true
 strip = "symbols"
 panic = "unwind"
 

@@ -1271,6 +1271,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "filmcraft-h264enc"
+version = "0.15.0"
+source = "git+https://github.com/storytold/filmcraft?rev=5ed4952#5ed4952d43f6328d9c2bf7990f1c2e15dfa25011"
+dependencies = [
+ "filmcraft-bitstream",
+ "rayon",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "filmcraft-hevc"
 version = "0.15.0"
 source = "git+https://github.com/storytold/filmcraft?rev=5ed4952#5ed4952d43f6328d9c2bf7990f1c2e15dfa25011"
@@ -3937,7 +3947,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "voidedit"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "eframe",
  "image",
@@ -3948,15 +3958,27 @@ dependencies = [
 
 [[package]]
 name = "voidedit-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
 ]
 
 [[package]]
+name = "voidedit-export"
+version = "0.3.0"
+dependencies = [
+ "filmcraft-aac",
+ "filmcraft-h264enc",
+ "filmcraft-isobmff",
+ "voidedit-core",
+ "voidedit-media",
+ "voidedit-render",
+]
+
+[[package]]
 name = "voidedit-media"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "cpal",
  "filmcraft-codecs",
@@ -3967,26 +3989,30 @@ dependencies = [
 
 [[package]]
 name = "voidedit-render"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
+ "ab_glyph",
  "rayon",
  "voidedit-core",
 ]
 
 [[package]]
 name = "voidedit-ui"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "eframe",
  "rfd",
+ "serde",
+ "serde_json",
  "voidedit-core",
+ "voidedit-export",
  "voidedit-media",
  "voidedit-render",
 ]
 
 [[package]]
 name = "voidedit-update"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "self-replace",
  "serde_json",
