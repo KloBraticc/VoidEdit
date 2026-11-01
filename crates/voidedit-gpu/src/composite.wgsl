@@ -10,6 +10,9 @@ struct Layer {
     mask_flags: vec4<f32>,
     wipe_wave: vec4<f32>,
     canvas: vec4<f32>,
+    across: vec4<f32>,
+    down: vec4<f32>,
+    normal: vec4<f32>,
     ops: array<vec4<f32>, 48>,
 };
 
@@ -98,7 +101,17 @@ fn blend(mode: i32, base: vec3<f32>, top: vec3<f32>) -> vec3<f32> {
 fn fragment(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
     let half_size = layer.transform.zw;
     if half_size.x <= 0.0 || half_size.y <= 0.0 { discard; }
-    let d = position.xy - layer.transform.xy;
+    var d = position.xy - layer.transform.xy;
+    if layer.normal.w > 0.0 {
+        let direction = vec3<f32>(d, layer.normal.w);
+        let offset = vec3<f32>(0.0, 0.0, layer.across.w + layer.normal.w);
+        let denominator = dot(layer.normal.xyz, direction);
+        if abs(denominator) < 0.00001 { discard; }
+        let t = dot(layer.normal.xyz, offset) / denominator;
+        if t <= 0.0 { discard; }
+        let hit = direction * t - offset;
+        d = vec2<f32>(dot(layer.across.xyz, hit), dot(layer.down.xyz, hit));
+    }
     let s = layer.rotation_opacity.x;
     let k = layer.rotation_opacity.y;
     var local = vec2<f32>(d.x * k - d.y * s, d.x * s + d.y * k);

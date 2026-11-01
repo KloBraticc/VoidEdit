@@ -5,7 +5,7 @@ use eframe::wgpu;
 use voidedit_core::{Blend, MaskShape, Project, Shape};
 use voidedit_render::{layers, Image, Op, Resolved};
 
-const LAYER_BYTES: usize = 11 * 16 + 48 * 16;
+const LAYER_BYTES: usize = 14 * 16 + 48 * 16;
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 pub const VIEW_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 
@@ -80,7 +80,11 @@ fn encode_layer(layer: &Resolved, width: f32, height: f32) -> Option<Vec<u8>> {
         MaskShape::Rectangle => 1.0,
         MaskShape::Ellipse => 2.0,
     };
-    let rows: [[f32; 4]; 11] = [
+    let space = layer.space;
+    let across = space.map_or([0.0; 4], |value| [value.across[0], value.across[1], value.across[2], value.depth]);
+    let down = space.map_or([0.0; 4], |value| [value.down[0], value.down[1], value.down[2], 0.0]);
+    let normal = space.map_or([0.0; 4], |value| [value.normal[0], value.normal[1], value.normal[2], value.camera]);
+    let rows: [[f32; 4]; 14] = [
         [layer.x, layer.y, layer.half_w, layer.half_h],
         [layer.sin, layer.cos, layer.opacity, 0.0],
         [baked[0], baked[1], baked[2], encoded_shape],
@@ -92,6 +96,9 @@ fn encode_layer(layer: &Resolved, width: f32, height: f32) -> Option<Vec<u8>> {
         [mask_kind, mask.feather, mask.invert as u8 as f32, 0.0],
         [layer.wipe_x, layer.wipe_y, layer.wave.0, layer.wave.1],
         [width, height, 0.0, 0.0],
+        across,
+        down,
+        normal,
     ];
     let mut bytes = Vec::with_capacity(LAYER_BYTES);
     for row in rows {

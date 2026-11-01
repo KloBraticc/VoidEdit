@@ -23,6 +23,8 @@ fn gpu_matches_the_cpu_renderer() {
     ball.height = 30.0;
     ball.color = [60, 200, 120];
     ball.blend = Blend::Multiply;
+    ball.rotation_y = voidedit_core::Param::new(35.0);
+    ball.depth = voidedit_core::Param::new(-200.0);
     project.clips = vec![solid, ball];
     let mut cpu = Frame::default();
     render(&project, 0, 1.0, &mut cpu, &|_| None);

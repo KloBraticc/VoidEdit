@@ -133,6 +133,47 @@ pub struct Resolved {
     pub wipe_y: f32,
     pub lut: Option<Arc<Lut>>,
     pub wave: (f32, f32),
+    pub space: Option<Space>,
+}
+
+#[derive(Clone, Copy)]
+pub struct Space {
+    pub across: [f32; 3],
+    pub down: [f32; 3],
+    pub normal: [f32; 3],
+    pub depth: f32,
+    pub camera: f32,
+}
+
+const CAMERA_DISTANCE: f32 = 2000.0;
+
+fn space_of(clip: &Clip, frame: f32, scale: f32) -> Option<Space> {
+    let (rx, ry, depth) = (clip.rotation_x.at(frame), clip.rotation_y.at(frame), clip.depth.at(frame));
+    if rx == 0.0 && ry == 0.0 && depth == 0.0 {
+        return None;
+    }
+    let (sx, cx) = rx.to_radians().sin_cos();
+    let (sy, cy) = ry.to_radians().sin_cos();
+    Some(Space { across: [cy, 0.0, -sy], down: [sy * sx, cx, cy * sx], normal: [sy * cx, -sx, cy * cx], depth: depth * scale, camera: CAMERA_DISTANCE * scale })
+}
+
+fn dot3(a: [f32; 3], b: [f32; 3]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn project_local(space: &Space, dx: f32, dy: f32) -> Option<(f32, f32)> {
+    let direction = [dx, dy, space.camera];
+    let offset = [0.0, 0.0, space.depth + space.camera];
+    let denominator = dot3(space.normal, direction);
+    if denominator.abs() < 1e-5 {
+        return None;
+    }
+    let t = dot3(space.normal, offset) / denominator;
+    if t <= 0.0 {
+        return None;
+    }
+    let hit = [direction[0] * t, direction[1] * t, direction[2] * t - offset[2]];
+    Some((dot3(space.across, hit), dot3(space.down, hit)))
 }
 
 fn blend(mode: Blend, base: f32, top: f32) -> f32 {
@@ -477,6 +518,7 @@ fn resolve(clip: &Clip, frame: f32, scale: f32, image: Option<Arc<Image>>) -> Op
         wipe_y,
         lut,
         wave,
+        space: space_of(clip, frame, scale),
     })
 }
 
@@ -509,7 +551,10 @@ fn sample(layer: &Resolved, lx: f32, ly: f32) -> Option<([f32; 3], f32)> {
 }
 
 fn draw(layer: &Resolved, px: f32, py: f32) -> Option<([f32; 3], f32)> {
-    let (dx, dy) = (px - layer.x, py - layer.y);
+    let (mut dx, mut dy) = (px - layer.x, py - layer.y);
+    if let Some(space) = &layer.space {
+        (dx, dy) = project_local(space, dx, dy)?;
+    }
     let (mut lx, ly) = (dx * layer.cos - dy * layer.sin, dx * layer.sin + dy * layer.cos);
     if layer.wave.0 != 0.0 && layer.half_h > 0.0 {
         lx += layer.wave.0 * (ly / layer.half_h * layer.wave.1).sin();
@@ -634,6 +679,7 @@ pub fn layers(project: &Project, frame: u32, scale: f32, images: &dyn Fn(&str) -
                     wipe_y: main.wipe_y,
                     lut: None,
                     wave: main.wave,
+                    space: main.space,
                 }),
                 _ => None,
             });
@@ -695,6 +741,13 @@ mod tests {
         let lut = Lut::parse(text).unwrap();
         assert_eq!(lut.apply([255.0, 0.0, 0.0]), [255.0, 0.0, 0.0]);
         assert!(Lut::parse("LUT_3D_SIZE 2\n0 0 0").is_none());
+    }
+
+    #[test]
+    fn flat_space_matches_no_space() {
+        let space = Space { across: [1.0, 0.0, 0.0], down: [0.0, 1.0, 0.0], normal: [0.0, 0.0, 1.0], depth: 0.0, camera: 2000.0 };
+        let (x, y) = project_local(&space, 30.0, -20.0).unwrap();
+        assert!((x - 30.0).abs() < 0.01 && (y + 20.0).abs() < 0.01);
     }
 
     #[test]

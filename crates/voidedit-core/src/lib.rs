@@ -297,6 +297,12 @@ pub struct Clip {
     pub text_stroke: f32,
     #[serde(default)]
     pub text_background: bool,
+    #[serde(default = "default_zero")]
+    pub rotation_x: Param,
+    #[serde(default = "default_zero")]
+    pub rotation_y: Param,
+    #[serde(default = "default_zero")]
+    pub depth: Param,
     #[serde(default)]
     pub muted: bool,
     #[serde(default)]
@@ -305,6 +311,10 @@ pub struct Clip {
     pub bass: f32,
     #[serde(default)]
     pub treble: f32,
+}
+
+fn default_zero() -> Param {
+    Param::new(0.0)
 }
 
 fn default_text_size() -> f32 {
@@ -464,6 +474,35 @@ impl Project {
         best
     }
 
+    pub fn import_srt(&mut self, text: &str) -> usize {
+        let fps = self.fps as f64;
+        let mut added = 0;
+        let normalized = text.replace("\r\n", "\n");
+        for block in normalized.split("\n\n") {
+            let mut lines = block.lines().filter(|line| !line.trim().is_empty());
+            let first = lines.next();
+            let timing = if first.is_some_and(|line| line.contains("-->")) { first } else { lines.next() };
+            let Some((from, to)) = timing.and_then(|line| line.split_once("-->")) else { continue };
+            let (Some(from), Some(to)) = (srt_seconds(from), srt_seconds(to)) else { continue };
+            let caption: Vec<&str> = lines.collect();
+            if caption.is_empty() || to <= from {
+                continue;
+            }
+            let mut clip = self.new_text((from * fps) as u32);
+            clip.end = ((to * fps) as u32).max(clip.start + 1);
+            clip.name = "Caption".into();
+            clip.text = Some(caption.join("\n"));
+            clip.text_size = 54.0;
+            clip.text_stroke = 3.0;
+            clip.y = Param::new(self.height as f32 * 0.88);
+            clip.track = self.tracks.len() - 1;
+            self.duration = self.duration.max(clip.end + self.fps);
+            self.clips.push(clip);
+            added += 1;
+        }
+        added
+    }
+
     pub fn end_frame(&self) -> u32 {
         self.clips.iter().map(|clip| clip.end).max().unwrap_or(0)
     }
@@ -510,6 +549,9 @@ impl Project {
             mask: Mask::default(),
             text_stroke: 0.0,
             text_background: false,
+            rotation_x: default_zero(),
+            rotation_y: default_zero(),
+            depth: default_zero(),
             muted: false,
             pan: 0.0,
             bass: 0.0,
@@ -615,6 +657,15 @@ impl History {
     }
 }
 
+fn srt_seconds(text: &str) -> Option<f64> {
+    let cleaned = text.trim().replace(',', ".");
+    let mut parts = cleaned.split(':');
+    let hours: f64 = parts.next()?.parse().ok()?;
+    let minutes: f64 = parts.next()?.parse().ok()?;
+    let seconds: f64 = parts.next()?.parse().ok()?;
+    Some(hours * 3600.0 + minutes * 60.0 + seconds)
+}
+
 pub fn timecode(frame: u32, fps: u32) -> String {
     let fps = fps.max(1);
     let seconds = frame / fps;
@@ -694,6 +745,15 @@ mod tests {
         value.as_object_mut().unwrap().remove("markers");
         let loaded = Project::from_json(&value.to_string()).unwrap();
         assert_eq!(loaded.clips[0].volume.base, 100.0);
+    }
+
+    #[test]
+    fn srt_captions_become_text_clips() {
+        let mut project = Project::default();
+        let added = project.import_srt("1\n00:00:01,000 --> 00:00:02,500\nHello there\n\nbroken block\n\n2\n00:00:03,000 --> 00:00:04,000\nSecond\nline\n");
+        assert_eq!(added, 2);
+        assert_eq!(project.clips[0].start, 30);
+        assert_eq!(project.clips[1].text.as_deref(), Some("Second\nline"));
     }
 
     #[test]

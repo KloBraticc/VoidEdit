@@ -288,6 +288,17 @@ impl App {
         }
     }
 
+    fn import_captions(&mut self) {
+        let Some(file) = rfd::FileDialog::new().add_filter("Captions", &["srt"]).pick_file() else { return };
+        match std::fs::read_to_string(&file) {
+            Ok(text) => {
+                let added = self.project.import_srt(&text);
+                self.status = format!("Added {added} captions");
+            }
+            Err(error) => self.status = format!("Could not read the captions: {error}"),
+        }
+    }
+
     fn add_media(&mut self, file: String) {
         if !self.project.media.contains(&file) {
             self.project.media.push(file.clone());
@@ -585,6 +596,12 @@ impl App {
                         }
                     }
                 });
+                ui.menu_button("Captions", |ui| {
+                    if ui.button("Import SRT...").clicked() {
+                        ui.close_menu();
+                        self.import_captions();
+                    }
+                });
                 ui.menu_button("Sequence", |ui| {
                     if ui.button("Add Video Track").clicked() {
                         self.project.add_track(TrackKind::Video);
@@ -871,6 +888,9 @@ impl App {
                 Self::param(ui, accent, "Position Y", &mut clip.y, frame, 1.0);
                 Self::param(ui, accent, "Scale", &mut clip.scale, frame, 0.5);
                 Self::param(ui, accent, "Rotation", &mut clip.rotation, frame, 0.5);
+                Self::param(ui, accent, "3D Tilt X", &mut clip.rotation_x, frame, 0.5);
+                Self::param(ui, accent, "3D Tilt Y", &mut clip.rotation_y, frame, 0.5);
+                Self::param(ui, accent, "3D Depth", &mut clip.depth, frame, 2.0);
             });
             egui::CollapsingHeader::new("Opacity").default_open(true).show(ui, |ui| {
                 Self::param(ui, accent, "Opacity", &mut clip.opacity, frame, 0.5);
