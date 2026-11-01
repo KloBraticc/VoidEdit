@@ -1029,9 +1029,10 @@ impl App {
                 if widgets::head(ui, ph::WAVEFORM, "Sound Studio", self.show_studio).clicked() {
                     self.show_studio = !self.show_studio;
                 }
-                if widgets::head(ui, ph::MUSIC_NOTES, "Sound Library", self.show_media && self.bin == 2).clicked() {
-                    self.show_media = true;
-                    self.bin = 2;
+                if widgets::head(ui, ph::MUSIC_NOTES, "Sound Library", self.show_studio && self.studio_tab == 2).clicked() {
+                    let open = self.show_studio && self.studio_tab == 2;
+                    self.show_studio = !open;
+                    self.studio_tab = 2;
                 }
                 ui.menu_button(format!("{}  Menu", ph::LIST), |ui| {
                 ui.menu_button("File", |ui| {
