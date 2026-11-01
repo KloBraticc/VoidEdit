@@ -10,6 +10,7 @@ use eframe::egui::{self, Color32, Pos2, Rect, RichText, Sense, Stroke, Vec2};
 use settings::Settings;
 use voidedit_core::{timecode, Clip, Effect, History, MaskShape, Param, Project, Shape, TrackKind, BLENDS, EFFECT_NAMES, TRANSITIONS};
 use voidedit_export::{audio_clips, export_with, ExportFormat, ExportOptions, Progress};
+use voidedit_gpu::GpuCompositor;
 use voidedit_media::{waveform, Audio, FrameWant, Frames, Library};
 use voidedit_render::{render, wanted_frame, Frame};
 
@@ -64,6 +65,10 @@ pub struct App {
     search: String,
     preview: Frame,
     texture: Option<egui::TextureHandle>,
+    gpu: Option<GpuCompositor>,
+    gpu_texture: Option<egui::TextureId>,
+    gpu_used: bool,
+    render_state: Option<eframe::egui_wgpu::RenderState>,
     rendered: Option<(u32, Project, f32, u64)>,
     library: Library,
     frames: Frames,
@@ -114,6 +119,10 @@ impl App {
             search: String::new(),
             preview: Frame::default(),
             texture: None,
+            gpu: None,
+            gpu_texture: None,
+            gpu_used: false,
+            render_state: None,
             rendered: None,
             library,
             frames,
@@ -137,6 +146,26 @@ impl App {
         };
         app.apply_style();
         app
+    }
+
+    pub fn use_gpu(&mut self, state: eframe::egui_wgpu::RenderState) {
+        self.gpu = Some(GpuCompositor::new(state.device.clone(), state.queue.clone()));
+        self.render_state = Some(state);
+    }
+
+    fn render_gpu(&mut self, scale: f32) -> bool {
+        let frames = self.frames.clone();
+        let (Some(gpu), Some(state)) = (&mut self.gpu, &self.render_state) else { return false };
+        let Some(resized) = gpu.render(&self.project, self.frame, scale, &|path| frames.latest(path)) else { return false };
+        if resized || self.gpu_texture.is_none() {
+            let Some(view) = gpu.display_view() else { return false };
+            let mut renderer = state.renderer.write();
+            if let Some(old) = self.gpu_texture.take() {
+                renderer.free_texture(&old);
+            }
+            self.gpu_texture = Some(renderer.register_native_texture(&state.device, &view, eframe::wgpu::FilterMode::Linear));
+        }
+        true
     }
 
     fn accent(&self) -> Color32 {
@@ -899,7 +928,7 @@ impl App {
                     ui.add(egui::Slider::new(&mut clip.bass, -12.0..=12.0).text("Bass"));
                     ui.add(egui::Slider::new(&mut clip.treble, -12.0..=12.0).text("Treble"));
                 });
-            } else {
+            } else if clip.text.is_none() {
                 ui.horizontal(|ui| {
                     ui.label("Color");
                     ui.color_edit_button_srgb(&mut clip.color);
@@ -1005,18 +1034,22 @@ impl App {
         let generation = self.frames.generation();
         let stale = self.rendered.as_ref().is_none_or(|(frame, project, s, g)| *frame != self.frame || *s != scale || *g != generation || *project != self.project);
         if stale {
-            let frames = self.frames.clone();
-            render(&self.project, self.frame, scale, &mut self.preview, &|path| frames.latest(path));
-            let image = egui::ColorImage::from_rgba_unmultiplied([self.preview.width, self.preview.height], &self.preview.pixels);
-            match &mut self.texture {
-                Some(texture) => texture.set(image, egui::TextureOptions::LINEAR),
-                None => self.texture = Some(ui.ctx().load_texture("program", image, egui::TextureOptions::LINEAR)),
+            self.gpu_used = self.render_gpu(scale);
+            if !self.gpu_used {
+                let frames = self.frames.clone();
+                render(&self.project, self.frame, scale, &mut self.preview, &|path| frames.latest(path));
+                let image = egui::ColorImage::from_rgba_unmultiplied([self.preview.width, self.preview.height], &self.preview.pixels);
+                match &mut self.texture {
+                    Some(texture) => texture.set(image, egui::TextureOptions::LINEAR),
+                    None => self.texture = Some(ui.ctx().load_texture("program", image, egui::TextureOptions::LINEAR)),
+                }
             }
             self.rendered = Some((self.frame, self.project.clone(), scale, generation));
         }
         ui.allocate_ui_with_layout(area, egui::Layout::centered_and_justified(egui::Direction::TopDown), |ui| {
-            if let Some(texture) = &self.texture {
-                ui.add(egui::Image::new((texture.id(), size)).fit_to_exact_size(size).corner_radius(4));
+            let shown = if self.gpu_used { self.gpu_texture } else { self.texture.as_ref().map(egui::TextureHandle::id) };
+            if let Some(id) = shown {
+                ui.add(egui::Image::new((id, size)).fit_to_exact_size(size).corner_radius(4));
             }
         });
         let accent = self.accent();

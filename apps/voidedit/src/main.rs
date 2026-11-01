@@ -32,6 +32,9 @@ fn main() -> eframe::Result {
         options,
         Box::new(move |context| {
             let mut app = voidedit_ui::App::new(&context.egui_ctx, status);
+            if let Some(state) = context.wgpu_render_state.clone() {
+                app.use_gpu(state);
+            }
             if let Some(path) = std::env::args_os().nth(1) {
                 app.open_path(path.into());
             }

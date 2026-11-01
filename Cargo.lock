@@ -3978,6 +3978,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "voidedit-gpu"
+version = "1.0.0"
+dependencies = [
+ "eframe",
+ "pollster",
+ "voidedit-core",
+ "voidedit-render",
+]
+
+[[package]]
 name = "voidedit-media"
 version = "1.0.0"
 dependencies = [
@@ -4007,6 +4017,7 @@ dependencies = [
  "serde_json",
  "voidedit-core",
  "voidedit-export",
+ "voidedit-gpu",
  "voidedit-media",
  "voidedit-render",
 ]

@@ -21,7 +21,7 @@ pub struct Image {
 }
 
 #[derive(Clone, Copy)]
-enum Op {
+pub enum Op {
     Gain(f32),
     Mix([f32; 3], f32),
     Invert,
@@ -109,30 +109,30 @@ fn glow(image: &Image, amount: f32) -> Image {
     Image { width: image.width, height: image.height, pixels }
 }
 
-struct Resolved {
-    image: Option<Arc<Image>>,
-    cos: f32,
-    sin: f32,
-    x: f32,
-    y: f32,
-    half_w: f32,
-    half_h: f32,
-    shape: Shape,
-    color: [f32; 3],
-    opacity: f32,
-    ops: Vec<Op>,
-    vignette: f32,
-    pixelate: f32,
-    flip_x: bool,
-    flip_y: bool,
-    blend: Blend,
-    noise: f32,
-    key: Option<([f32; 3], f32, f32)>,
-    mask: voidedit_core::Mask,
-    wipe_x: f32,
-    wipe_y: f32,
-    lut: Option<Arc<Lut>>,
-    wave: (f32, f32),
+pub struct Resolved {
+    pub image: Option<Arc<Image>>,
+    pub cos: f32,
+    pub sin: f32,
+    pub x: f32,
+    pub y: f32,
+    pub half_w: f32,
+    pub half_h: f32,
+    pub shape: Shape,
+    pub color: [f32; 3],
+    pub opacity: f32,
+    pub ops: Vec<Op>,
+    pub vignette: f32,
+    pub pixelate: f32,
+    pub flip_x: bool,
+    pub flip_y: bool,
+    pub blend: Blend,
+    pub noise: f32,
+    pub key: Option<([f32; 3], f32, f32)>,
+    pub mask: voidedit_core::Mask,
+    pub wipe_x: f32,
+    pub wipe_y: f32,
+    pub lut: Option<Arc<Lut>>,
+    pub wave: (f32, f32),
 }
 
 fn blend(mode: Blend, base: f32, top: f32) -> f32 {
@@ -569,10 +569,35 @@ pub fn render(project: &Project, frame: u32, scale: f32, target: &mut Frame, ima
     target.width = width;
     target.height = height;
     target.pixels.resize(width * height * 4, 255);
+    let layers = layers(project, frame, scale, images);
+    let background = project.background.map(|channel| channel as f32);
+    target.pixels.par_chunks_mut(width * 4).enumerate().for_each(|(row, line)| {
+        let py = row as f32 + 0.5;
+        for (column, pixel) in line.chunks_exact_mut(4).enumerate() {
+            let px = column as f32 + 0.5;
+            let mut color = background;
+            for layer in &layers {
+                if let Some((source, alpha)) = draw(layer, px, py) {
+                    for index in 0..3 {
+                        let mixed = if layer.blend == Blend::Normal { source[index] } else { blend(layer.blend, color[index], source[index]) };
+                        color[index] += (mixed - color[index]) * alpha;
+                    }
+                }
+            }
+            pixel[0] = color[0].clamp(0.0, 255.0) as u8;
+            pixel[1] = color[1].clamp(0.0, 255.0) as u8;
+            pixel[2] = color[2].clamp(0.0, 255.0) as u8;
+            pixel[3] = 255;
+        }
+    });
+}
+
+pub fn layers(project: &Project, frame: u32, scale: f32, images: &dyn Fn(&str) -> Option<Arc<Image>>) -> Vec<Resolved> {
+    let scale = scale.clamp(0.05, 1.0);
     let time = frame as f32;
     let mut order: Vec<&Clip> = project.clips.iter().filter(|clip| wanted_frame(project, clip, frame)).collect();
     order.sort_by_key(|clip| clip.track);
-    let layers: Vec<Resolved> = order
+    order
         .into_iter()
         .filter_map(|clip| {
             let image = match (&clip.text, &clip.media) {
@@ -614,27 +639,7 @@ pub fn render(project: &Project, frame: u32, scale: f32, target: &mut Frame, ima
             });
             shadow.into_iter().chain(std::iter::once(main))
         })
-        .collect();
-    let background = project.background.map(|channel| channel as f32);
-    target.pixels.par_chunks_mut(width * 4).enumerate().for_each(|(row, line)| {
-        let py = row as f32 + 0.5;
-        for (column, pixel) in line.chunks_exact_mut(4).enumerate() {
-            let px = column as f32 + 0.5;
-            let mut color = background;
-            for layer in &layers {
-                if let Some((source, alpha)) = draw(layer, px, py) {
-                    for index in 0..3 {
-                        let mixed = if layer.blend == Blend::Normal { source[index] } else { blend(layer.blend, color[index], source[index]) };
-                        color[index] += (mixed - color[index]) * alpha;
-                    }
-                }
-            }
-            pixel[0] = color[0].clamp(0.0, 255.0) as u8;
-            pixel[1] = color[1].clamp(0.0, 255.0) as u8;
-            pixel[2] = color[2].clamp(0.0, 255.0) as u8;
-            pixel[3] = 255;
-        }
-    });
+        .collect()
 }
 
 #[cfg(test)]
