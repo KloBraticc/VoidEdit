@@ -6,7 +6,6 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use egui_dock::{DockArea, DockState, NodeIndex, Style, TabViewer};
 use eframe::egui::{self, Color32, Pos2, Rect, RichText, Sense, Stroke, Vec2};
 use settings::Settings;
 use voidedit_core::{timecode, Clip, Ease, Effect, History, MaskShape, Param, Project, Shape, TrackKind, BLENDS, EFFECT_NAMES, LOOKS, TRANSITIONS};
@@ -43,67 +42,6 @@ enum Drag {
     Move { grab: f32 },
     TrimStart,
     TrimEnd,
-}
-
-#[derive(Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
-enum Pane {
-    Media,
-    Program,
-    Controls,
-    Timeline,
-}
-
-fn default_layout() -> DockState<Pane> {
-    let mut state = DockState::new(vec![Pane::Program]);
-    let surface = state.main_surface_mut();
-    let [top, _] = surface.split_below(NodeIndex::root(), 0.62, vec![Pane::Timeline]);
-    let [top, _] = surface.split_left(top, 0.2, vec![Pane::Media]);
-    let _ = top;
-    let program = surface.find_tab(&Pane::Program).map(|(node, _)| node).unwrap_or(NodeIndex::root());
-    surface.split_right(program, 0.72, vec![Pane::Controls]);
-    state
-}
-
-struct Viewer<'a> {
-    app: &'a mut App,
-}
-
-impl TabViewer for Viewer<'_> {
-    type Tab = Pane;
-
-    fn title(&mut self, tab: &mut Pane) -> egui::WidgetText {
-        match tab {
-            Pane::Media => "Library",
-            Pane::Program => "Player",
-            Pane::Controls => "Details",
-            Pane::Timeline => "Timeline",
-        }
-        .into()
-    }
-
-    fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Pane) {
-        match tab {
-            Pane::Media => self.app.left_panel(ui),
-            Pane::Program => self.app.monitor(ui),
-            Pane::Controls => self.app.controls_panel(ui),
-            Pane::Timeline => {
-                self.app.tools(ui);
-                ui.horizontal_top(|ui| {
-                    let meter = Vec2::new(16.0, ui.available_height());
-                    let timeline = Vec2::new((ui.available_width() - meter.x - 8.0).max(50.0), ui.available_height());
-                    ui.allocate_ui(timeline, |ui| self.app.timeline(ui));
-                    let (bar, painter) = ui.allocate_painter(meter, Sense::hover());
-                    painter.rect_filled(bar.rect, 3.0_f32, Color32::from_gray(18));
-                    let level = Rect::from_min_max(Pos2::new(bar.rect.left(), bar.rect.bottom() - bar.rect.height() * self.app.meter), bar.rect.max);
-                    painter.rect_filled(level, 3.0_f32, Color32::from_rgb(70, 210, 110));
-                });
-            }
-        }
-    }
-
-    fn closeable(&mut self, _tab: &mut Pane) -> bool {
-        false
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -149,7 +87,6 @@ pub struct App {
     playing: bool,
     last_tick: Instant,
     last_autosave: Instant,
-    last_layout_save: Instant,
     remainder: f32,
     selected: Option<usize>,
     also_selected: Vec<usize>,
@@ -163,7 +100,6 @@ pub struct App {
     menu_clip: Option<usize>,
     menu_opened: Instant,
     system_accent: Option<[u8; 3]>,
-    dock: Option<DockState<Pane>>,
     drawing_mask: bool,
     captioning: Option<Arc<Mutex<CaptionJob>>>,
     gizmo: Option<Gizmo>,
@@ -219,7 +155,6 @@ impl App {
             playing: false,
             last_tick: Instant::now(),
             last_autosave: Instant::now(),
-            last_layout_save: Instant::now(),
             remainder: 0.0,
             selected: None,
             also_selected: Vec::new(),
@@ -233,7 +168,6 @@ impl App {
             menu_clip: None,
             menu_opened: Instant::now(),
             system_accent: settings::system_accent(),
-            dock: Some(Settings::folder().and_then(|folder| std::fs::read_to_string(folder.join("layout.json")).ok()).and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_else(default_layout)),
             drawing_mask: false,
             captioning: None,
             gizmo: None,
@@ -352,7 +286,7 @@ impl App {
         ctx.set_zoom_factor(self.settings.ui_scale.clamp(0.6, 2.0));
         let mut visuals = egui::Visuals::dark();
         let base = self.settings.panel_gray;
-        visuals.panel_fill = Color32::from_gray(base);
+        visuals.panel_fill = Color32::from_gray(base.saturating_sub(18));
         visuals.window_fill = Color32::from_gray(base.saturating_add(6));
         visuals.extreme_bg_color = Color32::from_gray(base.saturating_sub(12));
         visuals.selection.bg_fill = self.accent();
@@ -362,7 +296,11 @@ impl App {
         visuals.window_corner_radius = 10.into();
         visuals.menu_corner_radius = 8.into();
         visuals.widgets.noninteractive.corner_radius = 5.into();
-        visuals.widgets.inactive.corner_radius = 5.into();
+        visuals.widgets.inactive.corner_radius = 6.into();
+        visuals.widgets.inactive.bg_stroke = Stroke::NONE;
+        visuals.widgets.inactive.weak_bg_fill = Color32::from_gray(base.saturating_add(14));
+        visuals.widgets.hovered.bg_stroke = Stroke::NONE;
+        visuals.widgets.active.bg_stroke = Stroke::NONE;
         visuals.widgets.hovered.corner_radius = 5.into();
         visuals.widgets.active.corner_radius = 5.into();
         ctx.set_visuals(visuals);
@@ -838,8 +776,12 @@ impl App {
     }
 
     fn menu(&mut self, ctx: &egui::Context) {
-        egui::TopBottomPanel::top("menu").show(ctx, |ui| {
+        let bar = egui::Frame::new().inner_margin(egui::Margin::symmetric(10, 6));
+        egui::TopBottomPanel::top("menu").show_separator_line(false).frame(bar).show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
+                ui.label(RichText::new("Void Edit").strong().size(14.0));
+                ui.add_space(6.0);
+                ui.menu_button("Menu", |ui| {
                 ui.menu_button("File", |ui| {
                     let items: [(&str, fn(&mut App)); 6] = [
                         ("New", App::new_project),
@@ -953,10 +895,6 @@ impl App {
                     });
                 });
                 ui.menu_button("View", |ui| {
-                    if ui.button("Reset panel layout").clicked() {
-                        self.dock = Some(default_layout());
-                        ui.close_menu();
-                    }
                     ui.checkbox(&mut self.show_mixer, "Audio mixer");
                     if ui.button("Fit timeline").clicked() {
                         self.scroll = 0.0;
@@ -971,13 +909,14 @@ impl App {
                 if ui.button("Settings").clicked() {
                     self.show_settings = true;
                 }
+                });
                 let name = self.path.as_ref().and_then(|p| p.file_name()).map_or("Untitled".to_string(), |n| n.to_string_lossy().into_owned());
                 let changed = self.project != self.committed;
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.add(egui::Button::new(RichText::new("Export").color(Color32::WHITE)).fill(self.accent())).clicked() {
+                    if ui.add(egui::Button::new(RichText::new("Export").strong().color(Color32::WHITE)).fill(self.accent()).corner_radius(6).min_size(Vec2::new(84.0, 26.0))).clicked() {
                         self.show_export = true;
                     }
-                    ui.label(RichText::new(if changed { format!("{name} *") } else { name }).weak());
+                    ui.painter().text(ui.ctx().screen_rect().center_top() + Vec2::new(0.0, 18.0), egui::Align2::CENTER_CENTER, if changed { format!("{name} *") } else { name }, egui::FontId::proportional(13.0), Color32::LIGHT_GRAY);
                     if let Ok(update) = self.update_status.lock() {
                         if !update.is_empty() {
                             ui.label(RichText::new(update.as_str()).small().color(self.accent()));
@@ -1105,29 +1044,27 @@ impl App {
     }
 
     fn tab(&self, ui: &mut egui::Ui, active: bool, label: &str) -> bool {
-        let text = if active { RichText::new(label).strong() } else { RichText::new(label).weak() };
+        let text = if active { RichText::new(label).strong().color(Color32::WHITE) } else { RichText::new(label).color(Color32::GRAY) };
         let response = ui.add(egui::Label::new(text).sense(Sense::click()));
-        let id = response.id.with("underline");
-        let amount = ui.ctx().animate_bool_with_time(id, active, 0.15);
+        let amount = ui.ctx().animate_bool_with_time(response.id.with("pill"), active, 0.15);
         if amount > 0.0 {
-            let rect = response.rect;
-            let center = rect.center().x;
-            let half = rect.width() / 2.0 * amount;
-            ui.painter().line_segment([Pos2::new(center - half, rect.bottom() + 2.0), Pos2::new(center + half, rect.bottom() + 2.0)], Stroke::new(2.0_f32, self.accent()));
+            let rect = response.rect.expand2(Vec2::new(8.0, 5.0));
+            ui.painter().rect_filled(rect, 6.0_f32, self.accent().gamma_multiply(0.35 * amount));
         }
         response.clicked()
     }
 
     fn left_panel(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing.x = 12.0;
+            ui.spacing_mut().item_spacing = Vec2::new(11.0, 14.0);
+            ui.add_space(6.0);
             for (tab, label) in [(LeftTab::Media, "Media"), (LeftTab::Audio, "Audio"), (LeftTab::Text, "Text"), (LeftTab::Effects, "Effects"), (LeftTab::Transitions, "Transitions"), (LeftTab::Captions, "Captions"), (LeftTab::Filters, "Filters")] {
                 if self.tab(ui, self.left == tab, label) {
                     self.left = tab;
                 }
             }
         });
-        ui.add_space(8.0);
+        ui.add_space(14.0);
         if matches!(self.left, LeftTab::Media | LeftTab::Audio | LeftTab::Effects | LeftTab::Filters) {
             ui.add(egui::TextEdit::singleline(&mut self.search).hint_text("Search").desired_width(f32::INFINITY));
             ui.add_space(4.0);
@@ -1340,8 +1277,22 @@ impl App {
         let accent = self.accent();
         let names: Vec<String> = self.project.clips.iter().map(|clip| clip.name.clone()).collect();
         let Some(clip) = self.selected.and_then(|index| self.project.clips.get_mut(index)) else {
-            ui.add_space(20.0);
-            ui.vertical_centered(|ui| ui.label(RichText::new("Select a clip").weak()));
+            ui.label(RichText::new("Details").strong().color(self.accent()));
+            ui.add_space(10.0);
+            let name = self.path.as_ref().and_then(|path| path.file_stem()).map_or("Untitled".to_string(), |stem| stem.to_string_lossy().into_owned());
+            let rows = [
+                ("Name", name),
+                ("Resolution", format!("{} x {}", self.project.width, self.project.height)),
+                ("Frame rate", format!("{} fps", self.project.fps)),
+                ("Length", timecode(self.project.end_frame(), self.project.fps)),
+                ("Clips", self.project.clips.len().to_string()),
+            ];
+            for (label, value) in rows {
+                ui.horizontal(|ui| {
+                    ui.add_sized([100.0, 20.0], egui::Label::new(RichText::new(label).color(Color32::GRAY)));
+                    ui.label(value);
+                });
+            }
             return;
         };
         ui.add(egui::TextEdit::singleline(&mut clip.name).desired_width(f32::INFINITY));
@@ -1600,6 +1551,8 @@ impl App {
     }
 
     fn monitor(&mut self, ui: &mut egui::Ui) {
+        ui.label(RichText::new("Player").color(Color32::GRAY));
+        ui.add_space(4.0);
         let controls = 60.0;
         let area = Vec2::new(ui.available_width(), (ui.available_height() - controls).max(40.0));
         let aspect = self.project.width as f32 / self.project.height as f32;
@@ -1886,7 +1839,7 @@ impl App {
     fn timeline(&mut self, ui: &mut egui::Ui) {
         let (response, painter) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
         let rect = response.rect;
-        painter.rect_filled(rect, 4.0_f32, Color32::from_gray(self.settings.panel_gray.saturating_sub(8)));
+        painter.rect_filled(rect, 6.0_f32, Color32::from_gray(self.settings.panel_gray.saturating_sub(6)));
         let accent = self.accent();
         let zoom = self.zoom;
         let lane = rect.left() + HEADER_WIDTH;
@@ -1935,9 +1888,8 @@ impl App {
         for (row, track) in order.iter().enumerate() {
             let line = row_rect(row);
             let data = &self.project.tracks[*track];
-            painter.rect_filled(line, 0.0_f32, Color32::from_gray(self.settings.panel_gray.saturating_add(2)));
             let header = Rect::from_min_size(line.min, Vec2::new(HEADER_WIDTH - 2.0, line.height()));
-            painter.rect_filled(header, 0.0_f32, Color32::from_gray(self.settings.panel_gray.saturating_add(14)));
+            painter.rect_filled(header, 0.0_f32, Color32::from_gray(self.settings.panel_gray));
             painter.text(line.min + Vec2::new(10.0, 8.0), egui::Align2::LEFT_TOP, &data.name, egui::FontId::proportional(13.0), Color32::WHITE);
             let mute = Rect::from_min_size(line.min + Vec2::new(10.0, 32.0), Vec2::splat(22.0));
             let lock = Rect::from_min_size(line.min + Vec2::new(38.0, 32.0), Vec2::splat(22.0));
@@ -1981,9 +1933,9 @@ impl App {
             let block = Rect::from_min_max(Pos2::new(left, row.top() + 2.0), Pos2::new(right, row.bottom() - 2.0));
             let track = &self.project.tracks[clip.track];
             let fill = match track.kind {
-                TrackKind::Video if clip.text.is_some() => Color32::from_rgb(120, 70, 150),
-                TrackKind::Video => Color32::from_rgb(30, 70, 125),
-                TrackKind::Audio => Color32::from_rgb(20, 110, 60),
+                TrackKind::Video if clip.text.is_some() => Color32::from_rgb(150, 110, 60),
+                TrackKind::Video => accent.gamma_multiply(0.55),
+                TrackKind::Audio => Color32::from_rgb(35, 95, 85),
             };
             let selected = self.selected == Some(index) || self.also_selected.contains(&index);
             let glow = ui.ctx().animate_bool_with_time(egui::Id::new(("clip-glow", index)), selected, 0.12);
@@ -2185,26 +2137,24 @@ impl eframe::App for App {
         self.finish_captions();
         self.menu(ctx);
         self.windows(ctx);
-        if let Some(mut dock) = self.dock.take() {
-            let mut style = Style::from_egui(ctx.style().as_ref());
-            style.tab_bar.fill_tab_bar = false;
-            style.separator.width = 6.0;
-            style.separator.color_idle = Color32::from_gray(self.settings.panel_gray.saturating_sub(16));
-            style.main_surface_border_stroke = Stroke::NONE;
-            DockArea::new(&mut dock).style(style).show_close_buttons(false).show_add_buttons(false).show(ctx, &mut Viewer { app: self });
-            self.finish_media_drag(ctx);
-            if self.dock.is_none() {
-                self.dock = Some(dock);
-            }
-            if !ctx.input(|i| i.pointer.any_down()) && self.last_layout_save.elapsed().as_secs_f32() > 5.0 {
-                self.last_layout_save = Instant::now();
-                if let (Some(folder), Some(dock), true) = (Settings::folder(), &self.dock, true) {
-                    if let Ok(text) = serde_json::to_string(dock) {
-                        let _ = std::fs::write(folder.join("layout.json"), text);
-                    }
-                }
-            }
-        }
+        let base = self.settings.panel_gray;
+        let card = egui::Frame::new().fill(Color32::from_gray(base)).corner_radius(10).inner_margin(12).outer_margin(3);
+        egui::TopBottomPanel::bottom("timeline").resizable(true).default_height(340.0).min_height(160.0).show_separator_line(false).frame(card).show(ctx, |ui| {
+            self.tools(ui);
+            ui.horizontal_top(|ui| {
+                let meter = Vec2::new(10.0, ui.available_height());
+                let timeline = Vec2::new((ui.available_width() - meter.x - 8.0).max(50.0), ui.available_height());
+                ui.allocate_ui(timeline, |ui| self.timeline(ui));
+                let (bar, painter) = ui.allocate_painter(meter, Sense::hover());
+                painter.rect_filled(bar.rect, 5.0_f32, Color32::from_gray(18));
+                let level = Rect::from_min_max(Pos2::new(bar.rect.left(), bar.rect.bottom() - bar.rect.height() * self.meter), bar.rect.max);
+                painter.rect_filled(level, 5.0_f32, self.accent());
+            });
+        });
+        egui::SidePanel::left("library").resizable(true).default_width(400.0).min_width(260.0).show_separator_line(false).frame(card).show(ctx, |ui| self.left_panel(ui));
+        egui::SidePanel::right("details").resizable(true).default_width(320.0).min_width(240.0).show_separator_line(false).frame(card).show(ctx, |ui| self.controls_panel(ui));
+        egui::CentralPanel::default().frame(card).show(ctx, |ui| self.monitor(ui));
+        self.finish_media_drag(ctx);
         if !ctx.input(|i| i.pointer.any_down()) && self.project != self.committed {
             let before = std::mem::replace(&mut self.committed, self.project.clone());
             self.history.record(before);
