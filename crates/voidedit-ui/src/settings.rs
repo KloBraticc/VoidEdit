@@ -128,6 +128,27 @@ pub fn trim_memory() {
 #[cfg(not(windows))]
 pub fn trim_memory() {}
 
+#[cfg(windows)]
+pub fn drag_window(area: usize) {
+    const WM_NCLBUTTONDOWN: u32 = 0x00A1;
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn GetActiveWindow() -> *mut core::ffi::c_void;
+        fn ReleaseCapture() -> i32;
+        fn SendMessageW(window: *mut core::ffi::c_void, message: u32, wide: usize, long: isize) -> isize;
+    }
+    unsafe {
+        let window = GetActiveWindow();
+        if !window.is_null() {
+            ReleaseCapture();
+            SendMessageW(window, WM_NCLBUTTONDOWN, area, 0);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub fn drag_window(_area: usize) {}
+
 impl Settings {
     pub fn key(&self, action: &str) -> Option<eframe::egui::Key> {
         let default = ACTIONS.iter().find(|(name, _)| *name == action).map(|(_, key)| *key)?;

@@ -22,8 +22,24 @@ impl egui_software_backend::App for Software {
     }
 }
 
+#[cfg(windows)]
+fn placed(builder: eframe::egui::ViewportBuilder) -> eframe::egui::ViewportBuilder {
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn GetSystemMetrics(index: i32) -> i32;
+    }
+    let (screen_width, screen_height) = unsafe { (GetSystemMetrics(0) as f32, GetSystemMetrics(1) as f32) };
+    let (width, height) = (1500.0_f32.min(screen_width * 0.92), 950.0_f32.min(screen_height * 0.88));
+    builder.with_decorations(false).with_inner_size([width, height]).with_position([(screen_width - width) / 2.0, (screen_height - height) / 2.0])
+}
+
+#[cfg(not(windows))]
+fn placed(builder: eframe::egui::ViewportBuilder) -> eframe::egui::ViewportBuilder {
+    builder.with_inner_size([1500.0, 950.0])
+}
+
 fn viewport(transparent: bool) -> eframe::egui::ViewportBuilder {
-    eframe::egui::ViewportBuilder::default().with_title("Void Edit").with_transparent(transparent).with_inner_size([1500.0, 950.0]).with_min_inner_size([900.0, 600.0]).with_icon(icon())
+    placed(eframe::egui::ViewportBuilder::default().with_title("Void Edit").with_transparent(transparent).with_min_inner_size([900.0, 600.0]).with_icon(icon()))
 }
 
 fn build_app(context: &eframe::egui::Context, status: Arc<Mutex<String>>, project: &Option<std::ffi::OsString>) -> voidedit_ui::App {
@@ -45,7 +61,7 @@ fn run(accelerated: bool, project: Option<std::ffi::OsString>) -> bool {
         }
     });
     if accelerated {
-        let options = eframe::NativeOptions { renderer: eframe::Renderer::Glow, viewport: viewport(true), ..Default::default() };
+        let options = eframe::NativeOptions { renderer: eframe::Renderer::Glow, viewport: viewport(true), centered: true, ..Default::default() };
         return eframe::run_native("Void Edit", options, Box::new(move |context| Ok(Box::new(build_app(&context.egui_ctx, status, &project))))).is_ok();
     }
     let mut settings = egui_software_backend::SoftwareBackendAppConfiguration::new();

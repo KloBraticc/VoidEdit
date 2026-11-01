@@ -15,6 +15,7 @@ use voidedit_export::{audio_clips, export_with, ExportFormat, ExportOptions, Pro
 use voidedit_media::{decode_now, mono_samples, track_point, waveform, Audio, FrameWant, Frames, Library};
 use voidedit_render::{render, Frame};
 
+const HIT_CAPTION: usize = 2;
 const HEADER_WIDTH: f32 = 240.0;
 const RULER_HEIGHT: f32 = 44.0;
 const TRACK_HEIGHT: f32 = 64.0;
@@ -293,6 +294,32 @@ impl App {
         let [r, g, b] = self.settings.theme.card;
         let [x, y, z] = self.settings.theme.background;
         widgets::mix(Color32::from_rgb(r, g, b), Color32::from_rgb(x, y, z), amount)
+    }
+
+    fn window_edges(&self, ctx: &egui::Context) {
+        const EDGE: f32 = 6.0;
+        if !cfg!(windows) || ctx.input(|input| input.viewport().maximized.unwrap_or(false)) {
+            return;
+        }
+        let Some(pointer) = ctx.input(|input| input.pointer.hover_pos()) else { return };
+        let screen = ctx.content_rect();
+        let (left, right) = (pointer.x - screen.left() < EDGE, screen.right() - pointer.x < EDGE);
+        let (top, bottom) = (pointer.y - screen.top() < EDGE, screen.bottom() - pointer.y < EDGE);
+        let (area, icon) = match (left, right, top, bottom) {
+            (true, _, true, _) => (13, egui::CursorIcon::ResizeNwSe),
+            (_, true, true, _) => (14, egui::CursorIcon::ResizeNeSw),
+            (true, _, _, true) => (16, egui::CursorIcon::ResizeNeSw),
+            (_, true, _, true) => (17, egui::CursorIcon::ResizeNwSe),
+            (true, ..) => (10, egui::CursorIcon::ResizeHorizontal),
+            (_, true, ..) => (11, egui::CursorIcon::ResizeHorizontal),
+            (_, _, true, _) => (12, egui::CursorIcon::ResizeVertical),
+            (_, _, _, true) => (15, egui::CursorIcon::ResizeVertical),
+            _ => return,
+        };
+        ctx.set_cursor_icon(icon);
+        if ctx.input(|input| input.pointer.primary_pressed()) {
+            settings::drag_window(area);
+        }
     }
 
     fn release_idle_memory(&mut self, ctx: &egui::Context) {
@@ -883,6 +910,15 @@ impl App {
     fn menu(&mut self, root: &mut egui::Ui) {
         let bar = egui::Frame::new().fill(self.shade(0.5)).inner_margin(egui::Margin::symmetric(8, 3));
         egui::Panel::top("menu").show_separator_line(false).frame(bar).show_inside(root, |ui| {
+            if cfg!(windows) {
+                let title = ui.interact(ui.max_rect(), egui::Id::new("title-drag"), Sense::click_and_drag());
+                if title.double_clicked() {
+                    let maximized = ui.input(|input| input.viewport().maximized.unwrap_or(false));
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+                } else if title.drag_started() {
+                    settings::drag_window(HIT_CAPTION);
+                }
+            }
             egui::MenuBar::new().ui(ui, |ui| {
                                 if widgets::head(ui, ph::IMAGES, "Media Pool", self.show_media).clicked() {
                     self.show_media = !self.show_media;
@@ -1030,6 +1066,20 @@ impl App {
                 let name = self.path.as_ref().and_then(|p| p.file_name()).map_or("Untitled".to_string(), |n| n.to_string_lossy().into_owned());
                 let changed = self.project != self.committed;
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if cfg!(windows) {
+                        let context = ui.ctx().clone();
+                        if widgets::head(ui, ph::X, "", false).on_hover_text("Close").clicked() {
+                            context.send_viewport_cmd(egui::ViewportCommand::Close);
+                        }
+                        let maximized = ui.input(|input| input.viewport().maximized.unwrap_or(false));
+                        if widgets::head(ui, if maximized { ph::COPY } else { ph::SQUARE }, "", false).on_hover_text("Maximize").clicked() {
+                            context.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+                        }
+                        if widgets::head(ui, ph::MINUS, "", false).on_hover_text("Minimize").clicked() {
+                            context.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                        }
+                        ui.add_space(10.0);
+                    }
                     if widgets::head(ui, ph::SLIDERS_HORIZONTAL, "Inspector", self.show_inspector).clicked() {
                         self.show_inspector = !self.show_inspector;
                     }
@@ -2654,6 +2704,7 @@ impl App {
         self.finish_tracking();
         self.finish_captions();
         self.menu(root);
+        self.window_edges(ctx);
         self.windows(ctx);
         let theme = &self.settings.theme;
         let [r, g, b] = theme.card;
