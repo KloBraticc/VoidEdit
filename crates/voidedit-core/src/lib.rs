@@ -751,6 +751,10 @@ impl Project {
 
 pub const MAX_NESTING: u32 = 8;
 
+pub fn media_key(path: &str, seconds: f64) -> String {
+    format!("{path}\u{0}{}", (seconds * 1000.0).round() as i64)
+}
+
 #[derive(Default)]
 pub struct History {
     undo: Vec<Project>,

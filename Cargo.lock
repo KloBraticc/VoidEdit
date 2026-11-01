@@ -4058,6 +4058,7 @@ dependencies = [
  "filmcraft-codecs",
  "filmcraft-media",
  "filmcraft-time",
+ "voidedit-core",
  "voidedit-render",
 ]
 

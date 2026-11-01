@@ -777,7 +777,7 @@ pub fn layers(project: &Project, frame: u32, scale: f32, images: &dyn Fn(&str) -
                     Some(Arc::new(text_image(&visible, clip.text_size, clip.color, clip.text_stroke, clip.text_background)?))
                 }
                 (Some(text), _) => Some(Arc::new(text_image(text, clip.text_size, clip.color, clip.text_stroke, clip.text_background)?)),
-                (None, Some(path)) => Some(images(path)?),
+                (None, Some(path)) => Some(images(&voidedit_core::media_key(path, clip.media_seconds(frame, project.fps)))?),
                 (None, None) => None,
             };
             let main = resolve(clip, time, scale, image)?;
@@ -890,6 +890,28 @@ mod tests {
         project.clips.push(clip);
         project.nest(0);
         assert_eq!(first(&project), [50, 60, 70]);
+    }
+
+    #[test]
+    fn two_clips_of_one_file_ask_for_their_own_times() {
+        let mut project = small();
+        let mut left = project.new_media_clip("a", 0, Some((16, 16)), 1.0);
+        left.track = 1;
+        left.offset = 30;
+        let mut right = project.new_media_clip("a", 0, Some((16, 16)), 1.0);
+        right.track = 2;
+        right.offset = 60;
+        project.clips = vec![left, right];
+        let asked = Mutex::new(Vec::new());
+        render(&project, 0, 1.0, &mut Frame::default(), &|key| {
+            if let Ok(mut list) = asked.lock() {
+                list.push(key.to_string());
+            }
+            None
+        });
+        let list = asked.into_inner().unwrap();
+        assert_eq!(list.len(), 2);
+        assert_ne!(list[0], list[1]);
     }
 
     #[test]

@@ -252,7 +252,7 @@ impl App {
     fn render_gpu(&mut self, scale: f32) -> bool {
         let frames = self.frames.clone();
         let (Some(gpu), Some(state)) = (&mut self.gpu, &self.render_state) else { return false };
-        let Some(resized) = gpu.render(&self.project, self.frame, scale, &|path| frames.latest(path)) else { return false };
+        let Some(resized) = gpu.render(&self.project, self.frame, scale, &|key| frames.latest(key)) else { return false };
         if resized || self.gpu_texture.is_none() {
             let Some(view) = gpu.display_view() else { return false };
             let mut renderer = state.renderer.write();
@@ -1330,7 +1330,7 @@ impl App {
             self.gpu_used = self.render_gpu(scale);
             if !self.gpu_used {
                 let frames = self.frames.clone();
-                render(&self.project, self.frame, scale, &mut self.preview, &|path| frames.latest(path));
+                render(&self.project, self.frame, scale, &mut self.preview, &|key| frames.latest(key));
                 let image = egui::ColorImage::from_rgba_unmultiplied([self.preview.width, self.preview.height], &self.preview.pixels);
                 match &mut self.texture {
                     Some(texture) => texture.set(image, egui::TextureOptions::LINEAR),

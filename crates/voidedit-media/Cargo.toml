@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 voidedit-render.workspace = true
+voidedit-core.workspace = true
 cpal = "0.15"
 filmcraft-media = { git = "https://github.com/storytold/filmcraft", rev = "5ed4952" }
 filmcraft-codecs = { git = "https://github.com/storytold/filmcraft", rev = "5ed4952" }

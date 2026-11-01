@@ -93,14 +93,25 @@ impl Frames {
         let (state, signal) = &*self.state;
         let mut state = lock(state);
         if state.wants != wants {
-            state.ready.retain(|path, _| wants.iter().any(|want| &want.path == path));
+            state.ready.retain(|key, _| wants.iter().any(|want| key.split('\u{0}').next() == Some(want.path.as_str())));
             state.wants = wants;
             signal.notify_one();
         }
     }
 
-    pub fn latest(&self, path: &str) -> Option<Arc<Image>> {
-        lock(&self.state.0).ready.get(path).map(|(_, image)| image.clone())
+    pub fn latest(&self, key: &str) -> Option<Arc<Image>> {
+        let state = lock(&self.state.0);
+        if let Some((_, image)) = state.ready.get(key) {
+            return Some(image.clone());
+        }
+        let path = key.split('\u{0}').next()?;
+        let target = key.rsplit('\u{0}').next()?.parse::<f64>().ok()? / 1000.0;
+        state
+            .ready
+            .iter()
+            .filter(|(other, _)| other.split('\u{0}').next() == Some(path))
+            .min_by(|a, b| (a.1 .0 - target).abs().total_cmp(&(b.1 .0 - target).abs()))
+            .map(|(_, (_, image))| image.clone())
     }
 
     pub fn generation(&self) -> u64 {
@@ -113,7 +124,7 @@ impl Frames {
             let next = {
                 let mut guard = lock(state);
                 loop {
-                    let pending = guard.wants.iter().find(|want| guard.ready.get(&want.path).is_none_or(|(seconds, _)| *seconds != want.seconds)).cloned();
+                    let pending = guard.wants.iter().find(|want| !guard.ready.contains_key(&voidedit_core::media_key(&want.path, want.seconds))).cloned();
                     match pending {
                         Some(want) => break want,
                         None => guard = signal.wait(guard).unwrap_or_else(|poisoned| poisoned.into_inner()),
@@ -122,7 +133,21 @@ impl Frames {
             };
             let image = library.source(&next.path).and_then(|source| decode(&source, &next));
             let image = image.unwrap_or_else(|| Arc::new(Image { width: 1, height: 1, pixels: vec![0, 0, 0, 0] }));
-            lock(state).ready.insert(next.path, (next.seconds, image));
+            {
+                let mut guard = lock(state);
+                guard.ready.insert(voidedit_core::media_key(&next.path, next.seconds), (next.seconds, image));
+                let limit = guard.wants.len() * 2 + 2;
+                while guard.ready.len() > limit {
+                    let wants = guard.wants.clone();
+                    let stale = guard.ready.keys().find(|key| !wants.iter().any(|want| &voidedit_core::media_key(&want.path, want.seconds) == *key)).cloned();
+                    match stale {
+                        Some(key) => {
+                            guard.ready.remove(&key);
+                        }
+                        None => break,
+                    }
+                }
+            }
             self.generation.fetch_add(1, Ordering::Relaxed);
             on_ready();
         }

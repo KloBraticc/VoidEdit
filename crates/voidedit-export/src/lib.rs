@@ -171,8 +171,9 @@ fn gather(project: &Project, library: &Library, index: u32) -> HashMap<String, A
     let mut found = Vec::new();
     project.wanted_media(index, 0, &mut found);
     for (path, seconds) in found {
-        if let Some(image) = decode_now(library, &FrameWant { path: path.clone(), seconds, scale: 1.0 }) {
-            images.insert(path, image);
+        let key = voidedit_core::media_key(&path, seconds);
+        if let Some(image) = decode_now(library, &FrameWant { path, seconds, scale: 1.0 }) {
+            images.insert(key, image);
         }
     }
     images

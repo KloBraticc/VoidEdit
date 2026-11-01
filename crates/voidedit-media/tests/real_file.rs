@@ -9,10 +9,10 @@ fn decodes_a_real_file_when_one_is_given() {
     let frames = Frames::new(library, Box::new(|| {}));
     frames.want(vec![FrameWant { path: path.clone(), seconds: 1.0, scale: 0.5 }]);
     let started = std::time::Instant::now();
-    while frames.latest(&path).is_none() && started.elapsed().as_secs() < 30 {
+    while frames.latest(&voidedit_core::media_key(&path, 1.0)).is_none() && started.elapsed().as_secs() < 30 {
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
-    let image = frames.latest(&path).expect("a frame arrives");
+    let image = frames.latest(&voidedit_core::media_key(&path, 1.0)).expect("a frame arrives");
     assert!(image.width > 1 && image.pixels.iter().any(|value| *value > 20));
     println!("decoded {}x{} in {:?}", image.width, image.height, started.elapsed());
 }
