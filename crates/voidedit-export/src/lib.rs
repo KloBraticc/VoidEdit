@@ -255,65 +255,76 @@ struct FrameRange {
     total: u32,
 }
 
+fn is_plain_frame(project: &Project, index: u32) -> bool {
+    let mut active = project.clips.iter().filter(|clip| clip.visible && index >= clip.start && index < clip.end && project.tracks.get(clip.track).is_some_and(|track| track.kind == voidedit_core::TrackKind::Video));
+    let (Some(clip), None) = (active.next(), active.next()) else { return false };
+    let fills = (clip.width * clip.scale.base / 100.0 - project.width as f32).abs() < 0.5 && (clip.height * clip.scale.base / 100.0 - project.height as f32).abs() < 0.5;
+    let centered = (clip.x.base - project.width as f32 / 2.0).abs() < 0.01 && (clip.y.base - project.height as f32 / 2.0).abs() < 0.01;
+    let flat = clip.rotation.base == 0.0 && clip.rotation_x.base == 0.0 && clip.rotation_y.base == 0.0 && clip.depth.base == 0.0 && clip.opacity.base >= 100.0;
+    clip.media.is_some() && clip.effects.is_empty() && clip.mask.points.is_empty() && clip.blend == voidedit_core::Blend::Normal && fills && centered && flat && !project.has_movement() && project.shutter_times(index, false).len() == 1
+}
+
 fn produce_frames(project: &Project, library: &Library, options: ExportOptions, worker_progress: &Arc<Progress>, sender: std::sync::mpsc::SyncSender<Arc<Planes>>, range: FrameRange, size: (usize, usize, f32, usize)) {
     let FrameRange { first, project_fps, fps, total } = range;
     let (width, height, scale, factor) = size;
     let source_of = |position: u32| first + (position as u64 * project_fps as u64 / fps as u64) as u32;
-            let batch_size = std::thread::available_parallelism().map_or(4, |count| count.get()).clamp(2, RENDER_AHEAD);
-            let reusable = !project.has_motion();
-            let mut previous: Option<(Vec<String>, Arc<Planes>)> = None;
-            let mut next = 0u32;
-            while next < total {
-                if worker_progress.cancel.load(Ordering::Relaxed) {
-                    return;
-                }
-                let mut batch: Vec<(Option<u32>, HashMap<String, Arc<Image>>, Vec<String>)> = Vec::new();
-                while next < total && batch.len() < batch_size {
-                    if worker_progress.cancel.load(Ordering::Relaxed) {
-                        return;
-                    }
-                    let index = source_of(next);
-                    next += 1;
-                    let mut wanted = Vec::new();
-                    project.wanted_media(index, 0, &mut wanted);
-                    let mut keys: Vec<String> = wanted.iter().map(|(path, seconds)| voidedit_core::media_key(path, (*seconds * SOURCE_STEPS).floor() / SOURCE_STEPS)).collect();
-                    keys.extend(project.clips.iter().enumerate().filter(|(_, clip)| index >= clip.start && index < clip.end).map(|(number, _)| number.to_string()));
-                    let last_keys = batch.last().map(|item| &item.2).or(previous.as_ref().map(|item| &item.0));
-                    if reusable && last_keys == Some(&keys) {
-                        batch.push((None, HashMap::new(), keys));
-                    } else {
-                        batch.push((Some(index), gather(project, library, index), keys));
-                    }
-                }
-                let finished: Vec<Option<Arc<Planes>>> = batch
-                    .par_iter()
-                    .map(|(index, images, _)| {
-                        let index = (*index)?;
-                        if worker_progress.cancel.load(Ordering::Relaxed) {
-                            return None;
-                        }
-                        let mut frame = Frame::default();
-                        render_final(project, index, scale, &mut frame, &|name| images.get(name).cloned());
-                        let (mut y, mut u, mut v) = (vec![0; width * height], vec![0; width * height / 4], vec![0; width * height / 4]);
-                        if factor > 1 {
-                            let mut enlarged = Frame::default();
-                            upscale(&frame, width, height, options.sharpen, &mut enlarged);
-                            to_yuv(&enlarged, width, height, &mut y, &mut u, &mut v);
-                        } else {
-                            to_yuv(&frame, width, height, &mut y, &mut u, &mut v);
-                        }
-                        Some(Arc::new((y, u, v)))
-                    })
-                    .collect();
-                for ((_, _, keys), planes) in batch.into_iter().zip(finished) {
-                    let Some(planes) = planes.or_else(|| previous.as_ref().map(|item| item.1.clone())) else { return };
-                    previous = Some((keys, planes.clone()));
-                    if sender.send(planes).is_err() {
-                        return;
-                    }
-                }
+    let reusable = !project.has_motion();
+    let batch_size = std::thread::available_parallelism().map_or(4, |count| count.get()).clamp(2, RENDER_AHEAD);
+    let mut previous: Option<(Vec<String>, Arc<Planes>)> = None;
+    let mut next = 0u32;
+    while next < total {
+        let mut batch: Vec<(Option<u32>, HashMap<String, Arc<Image>>, Vec<String>)> = Vec::with_capacity(batch_size);
+        while next < total && batch.len() < batch_size {
+            if worker_progress.cancel.load(Ordering::Relaxed) {
+                return;
+            }
+            let index = source_of(next);
+            next += 1;
+            let mut wanted = Vec::new();
+            project.wanted_media(index, 0, &mut wanted);
+            let mut keys: Vec<String> = wanted.iter().map(|(path, seconds)| voidedit_core::media_key(path, (*seconds * SOURCE_STEPS).floor() / SOURCE_STEPS)).collect();
+            keys.extend(project.clips.iter().enumerate().filter(|(_, clip)| index >= clip.start && index < clip.end).map(|(number, _)| number.to_string()));
+            let last_keys = batch.last().map(|item| &item.2).or(previous.as_ref().map(|item| &item.0));
+            if reusable && last_keys == Some(&keys) {
+                batch.push((None, HashMap::new(), keys));
+            } else {
+                batch.push((Some(index), gather(project, library, index), keys));
             }
         }
+        let finished: Vec<Option<Arc<Planes>>> = batch
+            .par_iter()
+            .map(|(index, images, _)| {
+                let index = (*index)?;
+                let mut frame = Frame::default();
+                let direct = if scale >= 1.0 && images.len() == 1 && is_plain_frame(project, index) { images.values().next().filter(|image| image.width == project.width as usize && image.height == project.height as usize) } else { None };
+                match direct {
+                    Some(image) => {
+                        frame.width = image.width;
+                        frame.height = image.height;
+                        frame.pixels.clone_from(&image.pixels);
+                    }
+                    None => render_final(project, index, scale, &mut frame, &|name| images.get(name).cloned()),
+                }
+                let (mut y, mut u, mut v) = (vec![0; width * height], vec![0; width * height / 4], vec![0; width * height / 4]);
+                if factor > 1 {
+                    let mut enlarged = Frame::default();
+                    upscale(&frame, width, height, options.sharpen, &mut enlarged);
+                    to_yuv(&enlarged, width, height, &mut y, &mut u, &mut v);
+                } else {
+                    to_yuv(&frame, width, height, &mut y, &mut u, &mut v);
+                }
+                Some(Arc::new((y, u, v)))
+            })
+            .collect();
+        for ((_, _, keys), planes) in batch.into_iter().zip(finished) {
+            let Some(planes) = planes.or_else(|| previous.as_ref().map(|item| item.1.clone())) else { return };
+            previous = Some((keys, planes.clone()));
+            if sender.send(planes).is_err() {
+                return;
+            }
+        }
+    }
+}
 
 #[cfg(windows)]
 fn write_hardware(project: &Project, library: &Library, path: &Path, options: ExportOptions, progress: &Arc<Progress>) -> Result<(), String> {
