@@ -1511,6 +1511,11 @@ impl App {
                 }
                 if self.options.format == ExportFormat::Mp4 {
                     widgets::section(ui, "H.264 encoding", |ui| {
+                        if cfg!(windows) {
+                            widgets::setting(ui, "Use graphics card (much faster)", |ui| {
+                                widgets::toggle(ui, &mut self.options.hardware, accent);
+                            });
+                        }
                         widgets::setting(ui, "Speed", |ui| {
                             for (label, value) in [("Best compression", ExportSpeed::Best), ("Balanced", ExportSpeed::Balanced), ("Fastest", ExportSpeed::Fastest)] {
                                 ui.selectable_value(&mut self.options.speed, value, label);

@@ -1,3 +1,6 @@
+#[cfg(windows)]
+mod hardware;
+
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::fs::File;
@@ -104,6 +107,7 @@ pub struct ExportOptions {
     pub scale: f32,
     pub quality: f32,
     pub format: ExportFormat,
+    pub hardware: bool,
     pub fps: u32,
     pub upscale: u32,
     pub sharpen: f32,
@@ -142,7 +146,7 @@ pub enum ExportFormat {
 
 impl Default for ExportOptions {
     fn default() -> Self {
-        Self { scale: 1.0, quality: 20.0, format: ExportFormat::Mp4, fps: 0, upscale: 1, sharpen: 0.4, speed: ExportSpeed::Fastest, rate: ExportRate::Quality, bitrate: 12_000, keyframes: 120, main_profile: false, audio: true, audio_kbps: 192, first_frame: 0, last_frame: 0, open_folder: true }
+        Self { scale: 1.0, quality: 20.0, format: ExportFormat::Mp4, hardware: true, fps: 0, upscale: 1, sharpen: 0.4, speed: ExportSpeed::Fastest, rate: ExportRate::Quality, bitrate: 12_000, keyframes: 120, main_profile: false, audio: true, audio_kbps: 192, first_frame: 0, last_frame: 0, open_folder: true }
     }
 }
 
@@ -224,7 +228,17 @@ pub fn export_with(project: &Project, library: &Library, path: &Path, options: E
     match options.format {
         ExportFormat::Wav => write_wav(project, library, path, progress),
         ExportFormat::PngSequence => write_png_sequence(project, library, path, options.scale, progress),
-        ExportFormat::Mp4 => write_mp4(project, library, path, options, progress),
+        ExportFormat::Mp4 => {
+            #[cfg(windows)]
+            if options.hardware && hardware::available() {
+                match write_hardware(project, library, path, options, progress) {
+                    Ok(()) => return Ok(()),
+                    Err(error) if error == "cancelled" => return Err(error),
+                    Err(_) => progress.done.store(0, Ordering::Relaxed),
+                }
+            }
+            write_mp4(project, library, path, options, progress)
+        }
     }
 }
 
@@ -234,63 +248,17 @@ pub fn export(project: &Project, library: &Library, path: &Path, progress: &Arc<
 
 type Planes = (Vec<u8>, Vec<u8>, Vec<u8>);
 const SOURCE_STEPS: f64 = 240.0;
-const RENDER_AHEAD: usize = 8;
+struct FrameRange {
+    first: u32,
+    project_fps: u32,
+    fps: u32,
+    total: u32,
+}
 
-fn write_mp4(project: &Project, library: &Library, path: &Path, options: ExportOptions, progress: &Arc<Progress>) -> Result<(), String> {
-    let scale = options.scale.clamp(0.1, 1.0);
-    let factor = options.upscale.clamp(1, 4) as usize;
-    let width = ((project.width as f32 * scale) as usize * factor) & !1;
-    let height = ((project.height as f32 * scale) as usize * factor) & !1;
-    let width = width.max(2);
-    let height = height.max(2);
-    let project_fps = project.fps.max(1);
-    let fps = if options.fps == 0 { project_fps } else { options.fps.min(project_fps) };
-    let project_end = project.end_frame().max(1);
-    let last = if options.last_frame == 0 { project_end } else { options.last_frame.min(project_end) };
-    let first = options.first_frame.min(last.saturating_sub(1));
+fn produce_frames(project: &Project, library: &Library, options: ExportOptions, worker_progress: &Arc<Progress>, sender: std::sync::mpsc::SyncSender<Arc<Planes>>, range: FrameRange, size: (usize, usize, f32, usize)) {
+    let FrameRange { first, project_fps, fps, total } = range;
+    let (width, height, scale, factor) = size;
     let source_of = |position: u32| first + (position as u64 * project_fps as u64 / fps as u64) as u32;
-    let total = ((last - first) as u64 * fps as u64 / project_fps as u64).max(1) as u32;
-    progress.total.store(total, Ordering::Relaxed);
-    let mut config = EncoderConfig::new(width as u32, height as u32, fps, 1);
-    config.format = PacketFormat::LengthPrefixed;
-    config.bframes = 0;
-    config.rate = match options.rate {
-        ExportRate::Quality => RateControl::Crf(options.quality.clamp(10.0, 40.0)),
-        ExportRate::Constant => RateControl::Cbr { kbps: options.bitrate.max(100) },
-        ExportRate::Variable => RateControl::Vbr { target_kbps: options.bitrate.max(100), max_kbps: options.bitrate.max(100) * 2 },
-    };
-    config.preset = match options.speed {
-        ExportSpeed::Fastest => filmcraft_h264enc::Preset::Speed,
-        ExportSpeed::Balanced => filmcraft_h264enc::Preset::Balanced,
-        ExportSpeed::Best => filmcraft_h264enc::Preset::Quality,
-    };
-    config.threads = 0;
-    config.slices = if options.speed == ExportSpeed::Fastest { std::thread::available_parallelism().map_or(4, |count| count.get()).min(16) } else { 0 };
-    config.keyint = options.keyframes.max(1);
-    if options.main_profile {
-        config.profile = filmcraft_h264enc::Profile::Main;
-    }
-    let mut encoder = Encoder::new(config).map_err(|error| format!("{error:?}"))?;
-    let file = BufWriter::new(File::create(path).map_err(|error| error.to_string())?);
-    let mut writer = Mp4Writer::new(file, WriterOptions::new(Brand::Mp4)).map_err(|error| error.to_string())?;
-    let avc = AvcConfig::parse(&encoder.avcc()).map_err(|error| format!("{error:?}"))?;
-    let video = writer.add_track(TrackConfig::new(SampleEntry::avc(avc, width as u16, height as u16), fps)).map_err(|error| error.to_string())?;
-    let clips = audio_clips(project);
-    let mut audio = if clips.is_empty() || !options.audio {
-        None
-    } else {
-        let aac = filmcraft_aac::Encoder::new(filmcraft_aac::EncoderConfig::cbr(AUDIO_RATE, 2, options.audio_kbps.clamp(64, 320) * 1000)).map_err(|error| format!("{error:?}"))?;
-        let entry = SampleEntry::aac(aac.audio_specific_config(), 2, AUDIO_RATE);
-        let track = writer.add_track(TrackConfig::new(entry, AUDIO_RATE)).map_err(|error| error.to_string())?;
-        Some((aac, track))
-    };
-    let audio_start = first as i64 * AUDIO_RATE as i64 / project_fps as i64;
-    let mut audio_position = audio_start;
-    let mut mixer = Mixer::default();
-    std::thread::scope(|scope| -> Result<(), String> {
-        let (sender, receiver) = std::sync::mpsc::sync_channel::<Arc<Planes>>(RENDER_AHEAD);
-        let worker_progress = progress.clone();
-        scope.spawn(move || {
             let batch_size = std::thread::available_parallelism().map_or(4, |count| count.get()).clamp(2, RENDER_AHEAD);
             let reusable = !project.has_motion();
             let mut previous: Option<(Vec<String>, Arc<Planes>)> = None;
@@ -345,7 +313,128 @@ fn write_mp4(project: &Project, library: &Library, path: &Path, options: ExportO
                     }
                 }
             }
-        });
+        }
+
+#[cfg(windows)]
+fn write_hardware(project: &Project, library: &Library, path: &Path, options: ExportOptions, progress: &Arc<Progress>) -> Result<(), String> {
+    let scale = options.scale.clamp(0.1, 1.0);
+    let factor = options.upscale.clamp(1, 4) as usize;
+    let width = (((project.width as f32 * scale) as usize * factor) & !1).max(2);
+    let height = (((project.height as f32 * scale) as usize * factor) & !1).max(2);
+    let project_fps = project.fps.max(1);
+    let fps = if options.fps == 0 { project_fps } else { options.fps.min(project_fps) };
+    let project_end = project.end_frame().max(1);
+    let last = if options.last_frame == 0 { project_end } else { options.last_frame.min(project_end) };
+    let first = options.first_frame.min(last.saturating_sub(1));
+    let total = ((last - first) as u64 * fps as u64 / project_fps as u64).max(1) as u32;
+    progress.total.store(total, Ordering::Relaxed);
+    let bitrate_kbps = match options.rate {
+        ExportRate::Quality => {
+            let bits_per_pixel = 0.15 * 2f64.powf((18.0 - options.quality.clamp(10.0, 40.0) as f64) / 6.0);
+            ((width * height) as f64 * fps as f64 * bits_per_pixel / 1000.0).clamp(1000.0, 200_000.0) as u32
+        }
+        _ => options.bitrate.max(500),
+    };
+    let clips = audio_clips(project);
+    let audio = (!clips.is_empty() && options.audio).then_some((AUDIO_RATE, options.audio_kbps));
+    let settings = hardware::VideoSettings { width: width as u32, height: height as u32, fps, bitrate_kbps, main_profile: options.main_profile };
+    let mut writer = hardware::HardwareWriter::new(path, &settings, audio).map_err(|error| error.to_string())?;
+    let audio_start = first as i64 * AUDIO_RATE as i64 / project_fps as i64;
+    let mut audio_position = audio_start;
+    let mut mixer = Mixer::default();
+    std::thread::scope(|scope| -> Result<(), String> {
+        let (sender, receiver) = std::sync::mpsc::sync_channel::<Arc<Planes>>(RENDER_AHEAD);
+        let worker_progress = progress.clone();
+        scope.spawn(move || produce_frames(project, library, options, &worker_progress, sender, FrameRange { first, project_fps, fps, total }, (width, height, scale, factor)));
+        for (position, planes) in receiver.iter().enumerate() {
+            if progress.cancel.load(Ordering::Relaxed) {
+                return Err("cancelled".into());
+            }
+            writer.video(&planes.0, &planes.1, &planes.2).map_err(|error| error.to_string())?;
+            if audio.is_some() {
+                let until = audio_start + (position as i64 + 1) * AUDIO_RATE as i64 / fps as i64;
+                let frames = (until - audio_position) as usize;
+                let mixed = mixer.mix(library, &clips, &project.master_fx, audio_position, frames, AUDIO_RATE);
+                audio_position = until;
+                writer.audio(&mixed).map_err(|error| error.to_string())?;
+            }
+            progress.done.store(position as u32 + 1, Ordering::Relaxed);
+        }
+        Ok(())
+    })?;
+    if progress.cancel.load(Ordering::Relaxed) {
+        return Err("cancelled".into());
+    }
+    writer.finish().map_err(|error| error.to_string())
+}
+
+pub fn hardware_available() -> bool {
+    #[cfg(windows)]
+    {
+        hardware::available()
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+const RENDER_AHEAD: usize = 8;
+
+fn write_mp4(project: &Project, library: &Library, path: &Path, options: ExportOptions, progress: &Arc<Progress>) -> Result<(), String> {
+    let scale = options.scale.clamp(0.1, 1.0);
+    let factor = options.upscale.clamp(1, 4) as usize;
+    let width = ((project.width as f32 * scale) as usize * factor) & !1;
+    let height = ((project.height as f32 * scale) as usize * factor) & !1;
+    let width = width.max(2);
+    let height = height.max(2);
+    let project_fps = project.fps.max(1);
+    let fps = if options.fps == 0 { project_fps } else { options.fps.min(project_fps) };
+    let project_end = project.end_frame().max(1);
+    let last = if options.last_frame == 0 { project_end } else { options.last_frame.min(project_end) };
+    let first = options.first_frame.min(last.saturating_sub(1));
+    let total = ((last - first) as u64 * fps as u64 / project_fps as u64).max(1) as u32;
+    progress.total.store(total, Ordering::Relaxed);
+    let mut config = EncoderConfig::new(width as u32, height as u32, fps, 1);
+    config.format = PacketFormat::LengthPrefixed;
+    config.bframes = 0;
+    config.rate = match options.rate {
+        ExportRate::Quality => RateControl::Crf(options.quality.clamp(10.0, 40.0)),
+        ExportRate::Constant => RateControl::Cbr { kbps: options.bitrate.max(100) },
+        ExportRate::Variable => RateControl::Vbr { target_kbps: options.bitrate.max(100), max_kbps: options.bitrate.max(100) * 2 },
+    };
+    config.preset = match options.speed {
+        ExportSpeed::Fastest => filmcraft_h264enc::Preset::Speed,
+        ExportSpeed::Balanced => filmcraft_h264enc::Preset::Balanced,
+        ExportSpeed::Best => filmcraft_h264enc::Preset::Quality,
+    };
+    config.threads = 0;
+    config.slices = if options.speed == ExportSpeed::Fastest { std::thread::available_parallelism().map_or(4, |count| count.get()).min(16) } else { 0 };
+    config.keyint = options.keyframes.max(1);
+    if options.main_profile {
+        config.profile = filmcraft_h264enc::Profile::Main;
+    }
+    let mut encoder = Encoder::new(config).map_err(|error| format!("{error:?}"))?;
+    let file = BufWriter::new(File::create(path).map_err(|error| error.to_string())?);
+    let mut writer = Mp4Writer::new(file, WriterOptions::new(Brand::Mp4)).map_err(|error| error.to_string())?;
+    let avc = AvcConfig::parse(&encoder.avcc()).map_err(|error| format!("{error:?}"))?;
+    let video = writer.add_track(TrackConfig::new(SampleEntry::avc(avc, width as u16, height as u16), fps)).map_err(|error| error.to_string())?;
+    let clips = audio_clips(project);
+    let mut audio = if clips.is_empty() || !options.audio {
+        None
+    } else {
+        let aac = filmcraft_aac::Encoder::new(filmcraft_aac::EncoderConfig::cbr(AUDIO_RATE, 2, options.audio_kbps.clamp(64, 320) * 1000)).map_err(|error| format!("{error:?}"))?;
+        let entry = SampleEntry::aac(aac.audio_specific_config(), 2, AUDIO_RATE);
+        let track = writer.add_track(TrackConfig::new(entry, AUDIO_RATE)).map_err(|error| error.to_string())?;
+        Some((aac, track))
+    };
+    let audio_start = first as i64 * AUDIO_RATE as i64 / project_fps as i64;
+    let mut audio_position = audio_start;
+    let mut mixer = Mixer::default();
+    std::thread::scope(|scope| -> Result<(), String> {
+        let (sender, receiver) = std::sync::mpsc::sync_channel::<Arc<Planes>>(RENDER_AHEAD);
+        let worker_progress = progress.clone();
+        scope.spawn(move || produce_frames(project, library, options, &worker_progress, sender, FrameRange { first, project_fps, fps, total }, (width, height, scale, factor)));
         for (position, planes) in receiver.iter().enumerate() {
             let (y, u, v) = &*planes;
             if progress.cancel.load(Ordering::Relaxed) {
