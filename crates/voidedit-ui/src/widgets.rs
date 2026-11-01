@@ -88,6 +88,19 @@ pub fn scrubber(ui: &mut egui::Ui, value: &mut f32, end: f32, accent: Color32) -
     changed
 }
 
+pub fn primary_card(ui: &mut egui::Ui, icon: &str, title: &str, detail: &str, accent: Color32, primary: bool) -> Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(250.0, 66.0), Sense::click());
+    let (hover, press) = motion(ui, &response);
+    let text = ui.visuals().text_color();
+    let base = if primary { accent } else { Color32::from_gray(44) };
+    ui.painter().rect_filled(rect.shrink(press), 8.0_f32, mix(base, Color32::WHITE, hover * 0.08));
+    let (title_color, detail_color) = if primary { (Color32::WHITE, Color32::from_white_alpha(190)) } else { (text, Color32::GRAY) };
+    paint_icon(ui.painter(), rect.left_center() + Vec2::new(30.0, 0.0), 24.0, icon, title_color);
+    ui.painter().text(rect.left_center() + Vec2::new(58.0, -10.0), egui::Align2::LEFT_CENTER, title, egui::FontId::proportional(15.0), title_color);
+    ui.painter().text(rect.left_center() + Vec2::new(58.0, 11.0), egui::Align2::LEFT_CENTER, detail, egui::FontId::proportional(11.0), detail_color);
+    response
+}
+
 pub fn heading(ui: &mut egui::Ui, icon: &str, label: &str, accent: Color32) {
     ui.add_space(6.0);
     ui.label(RichText::new(format!("{icon}  {label}")).strong().color(accent));

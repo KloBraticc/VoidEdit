@@ -84,6 +84,7 @@ pub struct Settings {
     pub wallpaper: String,
     pub wallpaper_dim: f32,
     pub animations: bool,
+    pub home: crate::home::HomeSettings,
     pub ui_scale: f32,
     pub preview_quality: f32,
     pub snapping: bool,
@@ -95,7 +96,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { accent: [150, 100, 235], theme: Theme::default(), backdrop: Backdrop::None, wallpaper: String::new(), wallpaper_dim: 0.45, animations: true, ui_scale: 1.0, preview_quality: 1.0, snapping: true, gpu_preview: false, system_accent: false, caption_language: "auto".into(), keys: Default::default() }
+        Self { accent: [150, 100, 235], theme: Theme::default(), backdrop: Backdrop::None, wallpaper: String::new(), wallpaper_dim: 0.45, animations: true, home: Default::default(), ui_scale: 1.0, preview_quality: 1.0, snapping: true, gpu_preview: false, system_accent: false, caption_language: "auto".into(), keys: Default::default() }
     }
 }
 

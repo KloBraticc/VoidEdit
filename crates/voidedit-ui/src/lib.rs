@@ -1,4 +1,5 @@
 use egui_phosphor::regular as ph;
+mod home;
 mod widgets;
 mod settings;
 
@@ -105,6 +106,9 @@ pub struct App {
     show_strip: bool,
     show_inspector: bool,
     bin: usize,
+    show_home: bool,
+    projects: home::Library,
+    home: home::HomeState,
     show_studio: bool,
     studio_tab: usize,
     studio_search: String,
@@ -217,6 +221,9 @@ impl App {
             show_strip: true,
             show_inspector: true,
             bin: 0,
+            show_home: true,
+            projects: home::Library::load(),
+            home: home::HomeState::default(),
             show_studio: false,
             studio_tab: 0,
             studio_search: String::new(),
@@ -294,6 +301,35 @@ impl App {
         let [r, g, b] = self.settings.theme.card;
         let [x, y, z] = self.settings.theme.background;
         widgets::mix(Color32::from_rgb(r, g, b), Color32::from_rgb(x, y, z), amount)
+    }
+
+    fn title_drag(&self, ui: &mut egui::Ui) {
+        if cfg!(windows) {
+            let title = ui.interact(ui.max_rect(), egui::Id::new("title-drag"), Sense::click_and_drag());
+            if title.double_clicked() {
+                let maximized = ui.input(|input| input.viewport().maximized.unwrap_or(false));
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+            } else if title.drag_started() {
+                settings::drag_window(HIT_CAPTION);
+            }
+        }
+    }
+
+    fn window_buttons(&self, ui: &mut egui::Ui) {
+        if cfg!(windows) {
+            let context = ui.ctx().clone();
+            if widgets::head(ui, ph::X, "", false).on_hover_text("Close").clicked() {
+                context.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            let maximized = ui.input(|input| input.viewport().maximized.unwrap_or(false));
+            if widgets::head(ui, if maximized { ph::COPY } else { ph::SQUARE }, "", false).on_hover_text("Maximize").clicked() {
+                context.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+            }
+            if widgets::head(ui, ph::MINUS, "", false).on_hover_text("Minimize").clicked() {
+                context.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+            }
+            ui.add_space(10.0);
+        }
     }
 
     fn window_edges(&self, ctx: &egui::Context) {
@@ -478,7 +514,9 @@ impl App {
                 self.project = project;
                 self.committed = self.project.clone();
                 self.history = History::default();
+                self.projects.record(&path, &self.project, true);
                 self.path = Some(path);
+                self.show_home = false;
                 self.selected = None;
                 self.frame = 0;
                 for file in self.project.media.clone() {
@@ -505,7 +543,9 @@ impl App {
         match self.write_project(&path) {
             Ok(()) => {
                 self.status = "Saved".into();
+                self.projects.record(&path, &self.project, false);
                 self.path = Some(path);
+                self.save_thumbnail();
             }
             Err(error) => self.status = format!("Could not save: {error}"),
         }
@@ -910,17 +950,12 @@ impl App {
     fn menu(&mut self, root: &mut egui::Ui) {
         let bar = egui::Frame::new().fill(self.shade(0.5)).inner_margin(egui::Margin::symmetric(8, 3));
         egui::Panel::top("menu").show_separator_line(false).frame(bar).show_inside(root, |ui| {
-            if cfg!(windows) {
-                let title = ui.interact(ui.max_rect(), egui::Id::new("title-drag"), Sense::click_and_drag());
-                if title.double_clicked() {
-                    let maximized = ui.input(|input| input.viewport().maximized.unwrap_or(false));
-                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
-                } else if title.drag_started() {
-                    settings::drag_window(HIT_CAPTION);
-                }
-            }
+            self.title_drag(ui);
             egui::MenuBar::new().ui(ui, |ui| {
-                                if widgets::head(ui, ph::IMAGES, "Media Pool", self.show_media).clicked() {
+                                if widgets::head(ui, ph::HOUSE, "Home", false).on_hover_text("Save and go to your projects").clicked() {
+                    self.go_home();
+                }
+                if widgets::head(ui, ph::IMAGES, "Media Pool", self.show_media).clicked() {
                     self.show_media = !self.show_media;
                 }
                 if widgets::head(ui, ph::SPARKLE, "Effects", self.show_toolbox).clicked() {
@@ -1066,20 +1101,7 @@ impl App {
                 let name = self.path.as_ref().and_then(|p| p.file_name()).map_or("Untitled".to_string(), |n| n.to_string_lossy().into_owned());
                 let changed = self.project != self.committed;
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if cfg!(windows) {
-                        let context = ui.ctx().clone();
-                        if widgets::head(ui, ph::X, "", false).on_hover_text("Close").clicked() {
-                            context.send_viewport_cmd(egui::ViewportCommand::Close);
-                        }
-                        let maximized = ui.input(|input| input.viewport().maximized.unwrap_or(false));
-                        if widgets::head(ui, if maximized { ph::COPY } else { ph::SQUARE }, "", false).on_hover_text("Maximize").clicked() {
-                            context.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
-                        }
-                        if widgets::head(ui, ph::MINUS, "", false).on_hover_text("Minimize").clicked() {
-                            context.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
-                        }
-                        ui.add_space(10.0);
-                    }
+                    self.window_buttons(ui);
                     if widgets::head(ui, ph::SLIDERS_HORIZONTAL, "Inspector", self.show_inspector).clicked() {
                         self.show_inspector = !self.show_inspector;
                     }
@@ -2693,6 +2715,12 @@ impl App {
         self.release_idle_memory(ctx);
         self.sync_wallpaper(ctx);
         self.paint_background(ctx);
+        if self.show_home {
+            self.window_edges(ctx);
+            self.windows(ctx);
+            self.show_home(root);
+            return;
+        }
         self.input(ctx);
         self.tick(ctx);
         self.sync_audio(ctx);
