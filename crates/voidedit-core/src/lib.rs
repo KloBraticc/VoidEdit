@@ -651,17 +651,12 @@ impl Project {
             if !clip.visible || frame < clip.start || frame >= clip.end || self.tracks.get(clip.track).is_some_and(|track| track.kind != TrackKind::Video) {
                 continue;
             }
-            if let Some(path) = &clip.media {
+            if let Some(inner) = &clip.nested {
+                let shift = clip.offset as f32 - clip.start as f32;
+                inner.wanted_media_at(frame - clip.start + clip.offset, time + shift, depth + 1, found);
+            } else if let Some(path) = &clip.media {
                 found.push((path.clone(), clip.media_seconds_at(time, self.fps)));
-            } else if clip.nested.is_some() {
-                self.wanted_media_nested(clip, frame, depth, found);
             }
-        }
-    }
-
-    fn wanted_media_nested(&self, clip: &Clip, frame: u32, depth: u32, found: &mut Vec<(String, f64)>) {
-        if let Some(inner) = &clip.nested {
-            inner.wanted_media(frame - clip.start + clip.offset, depth + 1, found);
         }
     }
 

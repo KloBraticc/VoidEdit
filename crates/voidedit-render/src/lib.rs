@@ -979,7 +979,15 @@ pub fn wanted_frame(project: &Project, clip: &Clip, frame: u32) -> bool {
 }
 
 pub fn render(project: &Project, frame: u32, scale: f32, target: &mut Frame, images: &dyn Fn(&str) -> Option<Arc<Image>>) {
-    let times = project.shutter_times(frame, scale < 1.0);
+    render_blurred(project, frame, scale, scale < 1.0, target, images);
+}
+
+pub fn render_final(project: &Project, frame: u32, scale: f32, target: &mut Frame, images: &dyn Fn(&str) -> Option<Arc<Image>>) {
+    render_blurred(project, frame, scale, false, target, images);
+}
+
+fn render_blurred(project: &Project, frame: u32, scale: f32, preview: bool, target: &mut Frame, images: &dyn Fn(&str) -> Option<Arc<Image>>) {
+    let times = project.shutter_times(frame, preview);
     if times.len() < 2 {
         render_at(project, frame, frame as f32, scale, target, images);
         return;
@@ -1081,7 +1089,7 @@ fn layers_at(project: &Project, frame: u32, time: f32, scale: f32, images: &dyn 
         .filter_map(|clip| {
             if let Some(inner) = &clip.nested {
                 let mut nested = Frame::default();
-                render(inner, frame - clip.start + clip.offset, scale, &mut nested, images);
+                render_at(inner, frame - clip.start + clip.offset, time - clip.start as f32 + clip.offset as f32, scale, &mut nested, images);
                 let image = Arc::new(Image { width: nested.width, height: nested.height, pixels: nested.pixels });
                 return Some((clip, resolve(clip, time, scale, Some(image))?));
             }
@@ -1153,6 +1161,24 @@ mod tests {
         let mut frame = Frame::default();
         render(project, 0, 1.0, &mut frame, &|_| None);
         [frame.pixels[0], frame.pixels[1], frame.pixels[2]]
+    }
+
+    #[test]
+    fn final_render_blurs_every_sample_of_a_moving_clip() {
+        let mut project = Project { width: 64, height: 16, ..Project::default() };
+        let mut clip = project.new_clip(Shape::Solid, 0);
+        clip.color = [255, 255, 255];
+        clip.width = 8.0;
+        clip.height = 16.0;
+        clip.x = voidedit_core::Param::new(32.0);
+        clip.animations = vec![voidedit_core::Animation::new(voidedit_core::AnimKind::SlideRight, voidedit_core::Trigger::Whole, voidedit_core::Curve::Linear, 0, 1, 8000.0)];
+        clip.end = 400;
+        project.clips.push(clip);
+        project.motion_blur = voidedit_core::MotionBlur { enabled: true, samples: 16, shutter: 1.0 };
+        let mut frame = Frame::default();
+        render_final(&project, 2, 1.0, &mut frame, &|_| None);
+        let partial = frame.pixels.chunks_exact(4).filter(|pixel| pixel[0] > 10 && pixel[0] < 245).count();
+        assert!(partial > 16, "{partial}");
     }
 
     #[test]

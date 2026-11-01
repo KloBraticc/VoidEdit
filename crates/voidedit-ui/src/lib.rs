@@ -181,7 +181,7 @@ impl App {
         let audio = Audio::new(library.clone());
         let project = Project::default();
         let settings = Settings::load();
-        let app = Self {
+        let mut app = Self {
             committed: project.clone(),
             project,
             history: History::default(),
@@ -261,6 +261,8 @@ impl App {
             job: None,
             context: ctx.clone(),
         };
+        app.project.motion_blur = app.settings.motion_blur.clone();
+        app.committed = app.project.clone();
         app.apply_style();
         app
     }
@@ -367,6 +369,7 @@ impl App {
                 clip.height = project.height as f32;
                 clip.end = frames;
                 project.clips.push(clip);
+                project.motion_blur = self.settings.motion_blur.clone();
                 self.project = project;
                 self.committed = self.project.clone();
                 self.history = History::default();
@@ -604,6 +607,8 @@ impl App {
         self.project = Project::default();
         self.committed = self.project.clone();
         self.history = History::default();
+        self.project.motion_blur = self.settings.motion_blur.clone();
+        self.committed = self.project.clone();
         self.path = None;
         self.selected = None;
         self.frame = 0;
@@ -621,6 +626,8 @@ impl App {
                 self.project = project;
                 self.committed = self.project.clone();
                 self.history = History::default();
+                self.project.motion_blur = self.settings.motion_blur.clone();
+                self.committed = self.project.clone();
                 self.projects.record(&path, &self.project, true);
                 self.path = Some(path);
                 self.show_home = false;
@@ -3271,6 +3278,10 @@ impl eframe::App for App {
 impl App {
     pub fn show(&mut self, root: &mut egui::Ui) {
         let ctx = &root.ctx().clone();
+        if self.project.motion_blur != self.settings.motion_blur && !ctx.input(|input| input.pointer.any_down()) {
+            self.settings.motion_blur = self.project.motion_blur.clone();
+            self.settings.save();
+        }
         if self.applied_round != Some(self.settings.rounded) {
             self.applied_round = Some(self.settings.rounded);
             settings::set_rounded(self.settings.rounded);

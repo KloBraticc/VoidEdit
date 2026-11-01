@@ -276,7 +276,7 @@ impl App {
             return;
         };
         let path = unique_path(&folder, &draft.name);
-        self.project = Project { width: draft.width.max(16) & !1, height: draft.height.max(16) & !1, fps: draft.fps.clamp(1, 240), ..Project::default() };
+        self.project = Project { width: draft.width.max(16) & !1, height: draft.height.max(16) & !1, fps: draft.fps.clamp(1, 240), motion_blur: self.settings.motion_blur.clone(), ..Project::default() };
         self.committed = self.project.clone();
         self.path = Some(path.clone());
         self.selected = None;

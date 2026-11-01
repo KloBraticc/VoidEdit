@@ -10,7 +10,7 @@ use filmcraft_h264enc::{Encoder, EncoderConfig, PacketFormat, RateControl};
 use filmcraft_isobmff::{AvcConfig, Brand, Mp4Writer, SampleEntry, TrackConfig, WriteSample, WriterOptions};
 use voidedit_core::Project;
 use voidedit_media::{decode_now, AudioClip, FrameWant, Gain, Library, Mixer};
-use voidedit_render::{render, Frame, Image, upscale};
+use voidedit_render::{render_final, Frame, Image, upscale};
 
 const AUDIO_RATE: u32 = 48_000;
 
@@ -192,8 +192,8 @@ fn write_png_sequence(project: &Project, library: &Library, folder: &Path, scale
         if progress.cancel.load(Ordering::Relaxed) {
             return Err("cancelled".into());
         }
-        let images = gather(project, library, index, scale);
-        render(project, index, scale, &mut frame, &|name| images.get(name).cloned());
+        let images = gather(project, library, index);
+        render_final(project, index, scale, &mut frame, &|name| images.get(name).cloned());
         let path = folder.join(format!("frame_{index:06}.png"));
         image::save_buffer(&path, &frame.pixels, frame.width as u32, frame.height as u32, image::ColorType::Rgba8).map_err(|e| e.to_string())?;
         progress.done.store(index + 1, Ordering::Relaxed);
@@ -201,11 +201,11 @@ fn write_png_sequence(project: &Project, library: &Library, folder: &Path, scale
     Ok(())
 }
 
-fn gather(project: &Project, library: &Library, index: u32, scale: f32) -> HashMap<String, Arc<Image>> {
+fn gather(project: &Project, library: &Library, index: u32) -> HashMap<String, Arc<Image>> {
     let mut images = HashMap::new();
     let mut found = Vec::new();
     project.wanted_media(index, 0, &mut found);
-    for time in project.shutter_times(index, scale < 1.0) {
+    for time in project.shutter_times(index, false) {
         project.wanted_media_at(index, time, 0, &mut found);
     }
     found.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
@@ -291,13 +291,13 @@ fn write_mp4(project: &Project, library: &Library, path: &Path, options: ExportO
                 if worker_progress.cancel.load(Ordering::Relaxed) {
                     return;
                 }
-                let batch: Vec<(u32, HashMap<String, Arc<Image>>)> = (next..(next + batch_size as u32).min(last)).map(|index| (index, gather(project, library, index, scale))).collect();
+                let batch: Vec<(u32, HashMap<String, Arc<Image>>)> = (next..(next + batch_size as u32).min(last)).map(|index| (index, gather(project, library, index))).collect();
                 next += batch.len() as u32;
                 let finished: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)> = batch
                     .par_iter()
                     .map(|(index, images)| {
                         let mut frame = Frame::default();
-                        render(project, *index, scale, &mut frame, &|name| images.get(name).cloned());
+                        render_final(project, *index, scale, &mut frame, &|name| images.get(name).cloned());
                         let (mut y, mut u, mut v) = (vec![0; width * height], vec![0; width * height / 4], vec![0; width * height / 4]);
                         if factor > 1 {
                             let mut enlarged = Frame::default();
