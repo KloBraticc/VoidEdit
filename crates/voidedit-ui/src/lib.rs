@@ -45,6 +45,10 @@ struct ExportJob {
     started: Instant,
 }
 
+pub fn prefers_gpu_preview() -> bool {
+    Settings::load().gpu_preview
+}
+
 pub struct App {
     project: Project,
     committed: Project,
@@ -679,6 +683,7 @@ impl App {
             changed |= ui.add(egui::Slider::new(&mut self.settings.ui_scale, 0.6..=2.0).text("Interface size")).changed();
             changed |= ui.add(egui::Slider::new(&mut self.settings.preview_quality, 0.25..=1.0).text("Preview quality")).changed();
             changed |= ui.checkbox(&mut self.settings.snapping, "Snap clips while dragging").changed();
+            changed |= ui.checkbox(&mut self.settings.gpu_preview, "GPU preview (uses more memory, applies after a restart)").changed();
             if ui.button("Reset").clicked() {
                 self.settings = Settings::default();
                 changed = true;
