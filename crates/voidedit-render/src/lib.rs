@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use ab_glyph::{Font, FontRef, ScaleFont};
+use ab_glyph::{Font, FontRef, FontVec, ScaleFont};
 use rayon::prelude::*;
 use voidedit_core::{Blend, Clip, Effect, MaskShape, Project, Shape, TrackKind, Transition};
 
@@ -457,13 +457,63 @@ fn font() -> Option<&'static FontRef<'static>> {
     LOADED.get_or_init(|| FontRef::try_from_slice(FONT).ok()).as_ref()
 }
 
+const FALLBACK_FONTS: [&str; 16] = [
+    "C:/Windows/Fonts/segoeui.ttf",
+    "C:/Windows/Fonts/msyh.ttc",
+    "C:/Windows/Fonts/YuGothM.ttc",
+    "C:/Windows/Fonts/malgun.ttf",
+    "C:/Windows/Fonts/Nirmala.ttc",
+    "C:/Windows/Fonts/arial.ttf",
+    "C:/Windows/Fonts/LeelawUI.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/noto/NotoSans-Regular.ttf",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf",
+    "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+    "/System/Library/Fonts/PingFang.ttc",
+    "/System/Library/Fonts/AppleSDGothicNeo.ttc",
+];
+
+fn fallback_fonts() -> &'static [FontVec] {
+    static LOADED: OnceLock<Vec<FontVec>> = OnceLock::new();
+    LOADED.get_or_init(|| FALLBACK_FONTS.iter().filter_map(|path| FontVec::try_from_vec_and_index(std::fs::read(path).ok()?, 0).ok()).collect())
+}
+
+fn draw_glyph(font: &impl Font, c: char, size: f32, pen: f32, baseline: f32, width: usize, height: usize, pixels: &mut [u8]) -> f32 {
+    let scaled = font.as_scaled(size);
+    let id = font.glyph_id(c);
+    let glyph = id.with_scale_and_position(size, ab_glyph::point(pen, baseline));
+    if let Some(outlined) = font.outline_glyph(glyph) {
+        let bounds = outlined.px_bounds();
+        outlined.draw(|gx, gy, coverage| {
+            let px = gx as i64 + bounds.min.x as i64;
+            let py = gy as i64 + bounds.min.y as i64;
+            if px >= 0 && py >= 0 && (px as usize) < width && (py as usize) < height {
+                let alpha = &mut pixels[(py as usize * width + px as usize) * 4 + 3];
+                *alpha = (*alpha).max((coverage * 255.0) as u8);
+            }
+        });
+    }
+    scaled.h_advance(id)
+}
+
+fn advance_of(font: &FontRef<'static>, c: char, size: f32) -> f32 {
+    let id = font.glyph_id(c);
+    if id.0 != 0 || c.is_whitespace() {
+        return font.as_scaled(size).h_advance(id);
+    }
+    fallback_fonts().iter().find(|other| other.glyph_id(c).0 != 0).map_or(size / 2.0, |other| other.as_scaled(size).h_advance(other.glyph_id(c)))
+}
+
 pub fn text_image(text: &str, size: f32, color: [u8; 3], stroke: f32, background: bool) -> Option<Image> {
     let font = font()?;
     let size = size.clamp(4.0, 800.0);
     let scaled = font.as_scaled(size);
     let lines: Vec<&str> = text.split('\n').collect();
     let line_height = scaled.height() + scaled.line_gap();
-    let measure = |line: &str| line.chars().map(|c| scaled.h_advance(font.glyph_id(c))).sum::<f32>();
+    let measure = |line: &str| line.chars().map(|c| advance_of(font, c, size)).sum::<f32>();
     let width = (lines.iter().map(|line| measure(line)).fold(1.0f32, f32::max).ceil() as usize + 2).min(8192);
     let height = ((line_height * lines.len() as f32).ceil() as usize + 2).min(8192);
     let mut pixels = vec![0u8; width * height * 4];
@@ -474,19 +524,12 @@ pub fn text_image(text: &str, size: f32, color: [u8; 3], stroke: f32, background
         let mut pen = (width as f32 - measure(line)) / 2.0;
         let baseline = scaled.ascent() + row as f32 * line_height;
         for c in line.chars() {
-            let id = font.glyph_id(c);
-            let glyph = id.with_scale_and_position(size, ab_glyph::point(pen, baseline));
-            pen += scaled.h_advance(id);
-            if let Some(outlined) = font.outline_glyph(glyph) {
-                let bounds = outlined.px_bounds();
-                outlined.draw(|gx, gy, coverage| {
-                    let px = gx as i64 + bounds.min.x as i64;
-                    let py = gy as i64 + bounds.min.y as i64;
-                    if px >= 0 && py >= 0 && (px as usize) < width && (py as usize) < height {
-                        let alpha = &mut pixels[(py as usize * width + px as usize) * 4 + 3];
-                        *alpha = (*alpha).max((coverage * 255.0) as u8);
-                    }
-                });
+            if font.glyph_id(c).0 != 0 || c.is_whitespace() {
+                pen += draw_glyph(font, c, size, pen, baseline, width, height, &mut pixels);
+            } else if let Some(other) = fallback_fonts().iter().find(|other| other.glyph_id(c).0 != 0) {
+                pen += draw_glyph(other, c, size, pen, baseline, width, height, &mut pixels);
+            } else {
+                pen += size / 2.0;
             }
         }
     }
@@ -1049,6 +1092,17 @@ mod tests {
         clip.effects.push(Effect::Invert);
         project.clips.push(clip);
         assert_eq!(first(&project), [0, 0, 0]);
+    }
+
+    #[test]
+    fn other_scripts_use_system_fonts_when_present() {
+        if std::fs::metadata("C:/Windows/Fonts/msyh.ttc").is_err() {
+            return;
+        }
+        for text in ["\u{4f60}\u{597d}", "\u{d55c}\u{ae00}", "\u{0645}\u{0631}\u{062d}\u{0628}\u{0627}", "\u{0928}\u{092e}\u{0938}\u{094d}\u{0924}\u{0947}"] {
+            let image = text_image(text, 40.0, [255, 255, 255], 0.0, false).unwrap();
+            assert!(image.pixels.chunks_exact(4).filter(|pixel| pixel[3] > 200).count() > 20, "{text}");
+        }
     }
 
     #[test]

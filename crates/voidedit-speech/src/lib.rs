@@ -93,7 +93,9 @@ fn token(tokenizer: &Tokenizer, text: &str) -> Result<u32, String> {
     tokenizer.token_to_id(text).ok_or_else(|| format!("missing token {text}"))
 }
 
-pub const LANGUAGES: [(&str, &str); 13] = [("English", "en"), ("Spanish", "es"), ("French", "fr"), ("German", "de"), ("Portuguese", "pt"), ("Italian", "it"), ("Russian", "ru"), ("Japanese", "ja"), ("Korean", "ko"), ("Chinese", "zh"), ("Arabic", "ar"), ("Hindi", "hi"), ("Turkish", "tr")];
+pub const AUTO_DETECT: &str = "auto";
+
+pub const LANGUAGES: [(&str, &str); 99] = [("English", "en"), ("Chinese", "zh"), ("German", "de"), ("Spanish", "es"), ("Russian", "ru"), ("Korean", "ko"), ("French", "fr"), ("Japanese", "ja"), ("Portuguese", "pt"), ("Turkish", "tr"), ("Polish", "pl"), ("Catalan", "ca"), ("Dutch", "nl"), ("Arabic", "ar"), ("Swedish", "sv"), ("Italian", "it"), ("Indonesian", "id"), ("Hindi", "hi"), ("Finnish", "fi"), ("Vietnamese", "vi"), ("Hebrew", "he"), ("Ukrainian", "uk"), ("Greek", "el"), ("Malay", "ms"), ("Czech", "cs"), ("Romanian", "ro"), ("Danish", "da"), ("Hungarian", "hu"), ("Tamil", "ta"), ("Norwegian", "no"), ("Thai", "th"), ("Urdu", "ur"), ("Croatian", "hr"), ("Bulgarian", "bg"), ("Lithuanian", "lt"), ("Latin", "la"), ("Maori", "mi"), ("Malayalam", "ml"), ("Welsh", "cy"), ("Slovak", "sk"), ("Telugu", "te"), ("Persian", "fa"), ("Latvian", "lv"), ("Bengali", "bn"), ("Serbian", "sr"), ("Azerbaijani", "az"), ("Slovenian", "sl"), ("Kannada", "kn"), ("Estonian", "et"), ("Macedonian", "mk"), ("Breton", "br"), ("Basque", "eu"), ("Icelandic", "is"), ("Armenian", "hy"), ("Nepali", "ne"), ("Mongolian", "mn"), ("Bosnian", "bs"), ("Kazakh", "kk"), ("Albanian", "sq"), ("Swahili", "sw"), ("Galician", "gl"), ("Marathi", "mr"), ("Punjabi", "pa"), ("Sinhala", "si"), ("Khmer", "km"), ("Shona", "sn"), ("Yoruba", "yo"), ("Somali", "so"), ("Afrikaans", "af"), ("Occitan", "oc"), ("Georgian", "ka"), ("Belarusian", "be"), ("Tajik", "tg"), ("Sindhi", "sd"), ("Gujarati", "gu"), ("Amharic", "am"), ("Yiddish", "yi"), ("Lao", "lo"), ("Uzbek", "uz"), ("Faroese", "fo"), ("Haitian Creole", "ht"), ("Pashto", "ps"), ("Turkmen", "tk"), ("Nynorsk", "nn"), ("Maltese", "mt"), ("Sanskrit", "sa"), ("Luxembourgish", "lb"), ("Myanmar", "my"), ("Tibetan", "bo"), ("Tagalog", "tl"), ("Malagasy", "mg"), ("Assamese", "as"), ("Tatar", "tt"), ("Hawaiian", "haw"), ("Lingala", "ln"), ("Hausa", "ha"), ("Bashkir", "ba"), ("Javanese", "jw"), ("Sundanese", "su")];
 
 pub fn transcribe(folder: &Path, samples: &[f32], language: &str, mut progress: impl FnMut(f32)) -> Result<Vec<Segment>, String> {
     let error = |e: candle_core::Error| e.to_string();
@@ -107,7 +109,8 @@ pub fn transcribe(folder: &Path, samples: &[f32], language: &str, mut progress: 
     let frames = mel.len() / config.num_mel_bins;
     let mel = Tensor::from_vec(mel, (1, config.num_mel_bins, frames), &device).map_err(error)?;
     let start_of_text = token(&tokenizer, whisper::SOT_TOKEN)?;
-    let language = token(&tokenizer, &format!("<|{language}|>"))?;
+    let chosen = if language == AUTO_DETECT { None } else { Some(token(&tokenizer, &format!("<|{language}|>"))?) };
+    let mut detected = None;
     let task = token(&tokenizer, whisper::TRANSCRIBE_TOKEN)?;
     let end_of_text = token(&tokenizer, whisper::EOT_TOKEN)?;
     let no_timestamps = token(&tokenizer, whisper::NO_TIMESTAMPS_TOKEN)?;
@@ -127,7 +130,26 @@ pub fn transcribe(folder: &Path, samples: &[f32], language: &str, mut progress: 
         let part = mel.narrow(2, seek, window).map_err(error)?;
         let features = audio_pad(&part, config.num_mel_bins, &device).map_err(error)?;
         let encoded = model.encoder.forward(&features, true).map_err(error)?;
-        let mut tokens = vec![start_of_text, language, task];
+        let language_token = match (chosen, detected) {
+            (Some(token), _) | (None, Some(token)) => token,
+            (None, None) => {
+                let input = Tensor::new(&[start_of_text], &device).and_then(|t| t.unsqueeze(0)).map_err(error)?;
+                let decoded = model.decoder.forward(&input, &encoded, true).map_err(error)?;
+                let logits = model.decoder.final_linear(&decoded).map_err(error)?.i((0, 0)).map_err(error)?.to_vec1::<f32>().map_err(error)?;
+                let mut best = (f32::NEG_INFINITY, None);
+                for (_, code) in LANGUAGES {
+                    if let Ok(id) = token(&tokenizer, &format!("<|{code}|>")) {
+                        if let Some(score) = logits.get(id as usize).copied().filter(|score| *score > best.0) {
+                            best = (score, Some(id));
+                        }
+                    }
+                }
+                let found = best.1.ok_or("the language could not be detected")?;
+                detected = Some(found);
+                found
+            }
+        };
+        let mut tokens = vec![start_of_text, language_token, task];
         for step in 0..MAX_TOKENS_PER_WINDOW {
             let input = Tensor::new(tokens.as_slice(), &device).and_then(|t| t.unsqueeze(0)).map_err(error)?;
             let decoded = model.decoder.forward(&input, &encoded, step == 0).map_err(error)?;
@@ -207,13 +229,22 @@ mod tests {
     }
 
     #[test]
+    fn every_language_has_a_token() {
+        let Ok(folder) = std::env::var("VOIDEDIT_MODEL") else { return };
+        let tokenizer = Tokenizer::from_file(Path::new(&folder).join("tokenizer.json")).unwrap();
+        for (name, code) in LANGUAGES {
+            assert!(tokenizer.token_to_id(&format!("<|{code}|>")).is_some(), "{name}");
+        }
+    }
+
+    #[test]
     fn transcribes_a_given_file_when_one_is_given() {
         let (Ok(folder), Ok(raw)) = (std::env::var("VOIDEDIT_MODEL"), std::env::var("VOIDEDIT_PCM")) else { return };
         let bytes = std::fs::read(raw).unwrap();
         let samples: Vec<f32> = bytes.chunks_exact(2).map(|pair| i16::from_le_bytes([pair[0], pair[1]]) as f32 / 32768.0).collect();
         ensure_model(folder.as_ref(), |_| {}).unwrap();
         let started = std::time::Instant::now();
-        let result = transcribe(folder.as_ref(), &samples, "en", |_| {}).unwrap();
+        let result = transcribe(folder.as_ref(), &samples, AUTO_DETECT, |_| {}).unwrap();
         println!("{result:?} in {:?}", started.elapsed());
         assert!(!result.is_empty());
     }

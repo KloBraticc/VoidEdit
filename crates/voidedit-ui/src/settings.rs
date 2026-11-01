@@ -17,7 +17,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { accent: [58, 134, 255], panel_gray: 30, ui_scale: 1.0, preview_quality: 1.0, snapping: true, gpu_preview: false, caption_language: "en".into(), keys: Default::default() }
+        Self { accent: [58, 134, 255], panel_gray: 30, ui_scale: 1.0, preview_quality: 1.0, snapping: true, gpu_preview: false, caption_language: "auto".into(), keys: Default::default() }
     }
 }
 

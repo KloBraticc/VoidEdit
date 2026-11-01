@@ -846,8 +846,12 @@ impl App {
                     }
                 });
                 ui.menu_button("Captions", |ui| {
-                    let current = voidedit_speech::LANGUAGES.iter().find(|(_, code)| *code == self.settings.caption_language).map_or("English", |(name, _)| *name);
-                    egui::ComboBox::from_label("Spoken language").selected_text(current).show_ui(ui, |ui| {
+                    let current = voidedit_speech::LANGUAGES.iter().find(|(_, code)| *code == self.settings.caption_language).map_or("Detect automatically", |(name, _)| *name);
+                    egui::ComboBox::from_label("Spoken language").selected_text(current).height(320.0).show_ui(ui, |ui| {
+                        if ui.selectable_label(self.settings.caption_language == voidedit_speech::AUTO_DETECT, "Detect automatically").clicked() {
+                            self.settings.caption_language = voidedit_speech::AUTO_DETECT.to_string();
+                            self.settings.save();
+                        }
                         for (name, code) in voidedit_speech::LANGUAGES {
                             if ui.selectable_label(self.settings.caption_language == code, name).clicked() {
                                 self.settings.caption_language = code.to_string();
