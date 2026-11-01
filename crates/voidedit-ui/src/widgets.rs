@@ -183,11 +183,11 @@ pub fn section(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) 
 }
 
 pub fn accent_button(ui: &mut egui::Ui, label: &str, accent: Color32) -> Response {
-    ui.add(egui::Button::new(RichText::new(label).color(Color32::WHITE)).fill(accent).min_size(Vec2::new(86.0, 30.0)))
+    ui.add(egui::Button::new(RichText::new(label).color(Color32::WHITE)).fill(accent).min_size(Vec2::new(78.0, 26.0)))
 }
 
 pub fn plain_button(ui: &mut egui::Ui, label: &str) -> Response {
-    ui.add(egui::Button::new(label).min_size(Vec2::new(86.0, 30.0)))
+    ui.add(egui::Button::new(label).min_size(Vec2::new(78.0, 26.0)))
 }
 
 pub fn format_card(ui: &mut egui::Ui, name: &str, width: u32, height: u32, active: bool, accent: Color32) -> Response {
