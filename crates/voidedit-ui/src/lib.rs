@@ -2857,17 +2857,14 @@ impl App {
             let glow = ui.ctx().animate_bool_with_time(egui::Id::new(("clip-glow", index)), selected, 0.12);
             let hover = pointer.is_some_and(|p| block.contains(p));
             let lift = ui.ctx().animate_bool_with_time(egui::Id::new(("clip-hover", index)), hover, 0.1);
-            let pressed = hover && ui.input(|input| input.pointer.primary_down());
-            let press = ui.ctx().animate_bool_with_time(egui::Id::new(("clip-press", index)), pressed, 0.08);
-            let block = block.shrink2(Vec2::new(0.0, press * 1.5));
             let fill = widgets::mix(fill, Color32::WHITE, 0.14 * lift);
-            content.rect_filled(block, 2.0_f32, widgets::mix(fill, Color32::BLACK, 0.18 * press));
+            content.rect_filled(block, 2.0_f32, fill);
             content.rect_stroke(block, 2.0_f32, Stroke::new(1.0 + glow, Color32::from_gray(20 + (150.0 * lift) as u8).lerp_to_gamma(accent, glow)), egui::StrokeKind::Inside);
             let is_video = track.kind == TrackKind::Video;
             let name_bar = Rect::from_min_max(Pos2::new(block.left(), block.bottom() - 18.0), block.max);
             if is_video {
                 content.rect_filled(block, 2.0_f32, Color32::from_gray(26));
-                content.rect_filled(name_bar, 0.0_f32, widgets::mix(fill, Color32::BLACK, 0.18 * press));
+                content.rect_filled(name_bar, 0.0_f32, fill);
             }
             if let (Some(path), Some(waves)) = (&clip.media, &waves) {
                 if let Some(Some(peaks)) = waves.get(path) {
