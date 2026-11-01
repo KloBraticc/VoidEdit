@@ -113,6 +113,21 @@ pub fn system_accent() -> Option<[u8; 3]> {
     None
 }
 
+#[cfg(windows)]
+pub fn trim_memory() {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetCurrentProcess() -> *mut core::ffi::c_void;
+        fn K32EmptyWorkingSet(process: *mut core::ffi::c_void) -> i32;
+    }
+    unsafe {
+        K32EmptyWorkingSet(GetCurrentProcess());
+    }
+}
+
+#[cfg(not(windows))]
+pub fn trim_memory() {}
+
 impl Settings {
     pub fn key(&self, action: &str) -> Option<eframe::egui::Key> {
         let default = ACTIONS.iter().find(|(name, _)| *name == action).map(|(_, key)| *key)?;

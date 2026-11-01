@@ -136,7 +136,7 @@ impl Frames {
             {
                 let mut guard = lock(state);
                 guard.ready.insert(voidedit_core::media_key(&next.path, next.seconds), (next.seconds, image));
-                let limit = guard.wants.len() * 2 + 2;
+                let limit = guard.wants.len() + 1;
                 while guard.ready.len() > limit {
                     let wants = guard.wants.clone();
                     let stale = guard.ready.keys().find(|key| !wants.iter().any(|want| &voidedit_core::media_key(&want.path, want.seconds) == *key)).cloned();

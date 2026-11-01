@@ -102,6 +102,8 @@ pub struct App {
     menu_clip: Option<usize>,
     menu_opened: Instant,
     tab_changed: Instant,
+    last_active: Instant,
+    trimmed: bool,
     applied_backdrop: Option<settings::Backdrop>,
     wallpaper: Option<(String, egui::TextureHandle)>,
     theme_name: String,
@@ -209,6 +211,8 @@ impl App {
             settings,
             show_settings: false,
             tab_changed: Instant::now(),
+            last_active: Instant::now(),
+            trimmed: false,
             applied_backdrop: None,
             wallpaper: None,
             theme_name: String::new(),
@@ -300,6 +304,24 @@ impl App {
         widgets::mix(Color32::from_rgb(r, g, b), Color32::from_rgb(x, y, z), amount)
     }
 
+    fn release_idle_memory(&mut self, ctx: &egui::Context) {
+        const IDLE_SECONDS: u64 = 2;
+        let idle = std::time::Duration::from_secs(IDLE_SECONDS);
+        let busy = self.playing || ctx.input(|input| !input.events.is_empty() || input.pointer.any_down() || input.pointer.is_moving());
+        if busy {
+            self.last_active = Instant::now();
+            self.trimmed = false;
+            ctx.request_repaint_after(idle);
+            return;
+        }
+        if !self.trimmed && self.last_active.elapsed() >= idle {
+            self.trimmed = true;
+            settings::trim_memory();
+        } else if !self.trimmed {
+            ctx.request_repaint_after(idle);
+        }
+    }
+
     fn sync_backdrop(&mut self, frame: &eframe::Frame) {
         if self.applied_backdrop == Some(self.settings.backdrop) {
             return;
@@ -382,10 +404,10 @@ impl App {
         visuals.faint_bg_color = widgets::mix(card, text, 0.04);
         visuals.extreme_bg_color = widgets::mix(card, color(theme.background), 0.6);
         visuals.selection.bg_fill = accent;
-        visuals.selection.stroke = Stroke::new(1.0, accent);
+        visuals.selection.stroke = Stroke::new(1.0_f32, accent);
         visuals.window_corner_radius = theme.radius.into();
         visuals.menu_corner_radius = radius.into();
-        visuals.window_stroke = Stroke::new(1.0, widgets::mix(card, text, 0.12));
+        visuals.window_stroke = Stroke::new(1.0_f32, widgets::mix(card, text, 0.12));
         for (state, fill) in [(&mut visuals.widgets.noninteractive, card), (&mut visuals.widgets.inactive, widgets::mix(card, text, 0.08)), (&mut visuals.widgets.hovered, widgets::mix(card, accent, 0.4)), (&mut visuals.widgets.active, accent), (&mut visuals.widgets.open, widgets::mix(card, accent, 0.25))] {
             state.corner_radius = radius.into();
             state.bg_stroke = Stroke::NONE;
@@ -394,7 +416,7 @@ impl App {
             state.expansion = 0.0;
             state.fg_stroke.color = text;
         }
-        visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, widgets::mix(card, text, 0.08));
+        visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, widgets::mix(card, text, 0.08));
         ctx.set_visuals(visuals);
         ctx.style_mut(|style| {
             style.animation_time = if self.settings.animations { 0.14 } else { 0.0 };
@@ -1200,17 +1222,6 @@ impl App {
                 Err(error) => format!("Export failed: {error}"),
             };
         }
-    }
-
-    fn tab(&self, ui: &mut egui::Ui, active: bool, label: &str) -> bool {
-        let text = if active { RichText::new(label).strong().color(Color32::WHITE) } else { RichText::new(label).color(Color32::GRAY) };
-        let response = ui.add(egui::Label::new(text).sense(Sense::click()));
-        let amount = ui.ctx().animate_bool_with_time(response.id.with("pill"), active, 0.15);
-        if amount > 0.0 {
-            let rect = response.rect.expand2(Vec2::new(8.0, 5.0));
-            ui.painter().rect_filled(rect, 6.0_f32, self.accent().gamma_multiply(0.35 * amount));
-        }
-        response.clicked()
     }
 
     fn left_panel(&mut self, ui: &mut egui::Ui) {
@@ -2303,6 +2314,7 @@ impl eframe::App for App {
     }
 
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        self.release_idle_memory(ctx);
         self.sync_backdrop(frame);
         self.sync_wallpaper(ctx);
         self.paint_background(ctx);
