@@ -1,4 +1,5 @@
-use std::sync::{Arc, OnceLock};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use ab_glyph::{Font, FontRef, ScaleFont};
 use rayon::prelude::*;
@@ -35,6 +36,77 @@ enum Op {
     Levels(f32, f32),
     Balance([f32; 3]),
     Threshold(f32),
+    Wheels([f32; 3], [f32; 3], [f32; 3]),
+    Curve(f32, f32, f32),
+}
+
+pub struct Lut {
+    size: usize,
+    table: Vec<[f32; 3]>,
+}
+
+impl Lut {
+    pub fn parse(text: &str) -> Option<Lut> {
+        let mut size = 0;
+        let mut table = Vec::new();
+        for line in text.lines().map(str::trim) {
+            if let Some(value) = line.strip_prefix("LUT_3D_SIZE") {
+                size = value.trim().parse().ok()?;
+            } else if line.starts_with(|c: char| c.is_ascii_digit() || c == '-' || c == '.') {
+                let mut parts = line.split_whitespace().map(str::parse::<f32>);
+                table.push([parts.next()?.ok()?, parts.next()?.ok()?, parts.next()?.ok()?]);
+            }
+        }
+        (size >= 2 && size <= 129 && table.len() == size * size * size).then_some(Lut { size, table })
+    }
+
+    fn apply(&self, color: [f32; 3]) -> [f32; 3] {
+        let n = self.size - 1;
+        let at = |channel: f32| ((channel / 255.0).clamp(0.0, 1.0) * n as f32).round() as usize;
+        let value = self.table[at(color[2]) * self.size * self.size + at(color[1]) * self.size + at(color[0])];
+        value.map(|channel| channel * 255.0)
+    }
+}
+
+fn load_lut(path: &str) -> Option<Arc<Lut>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, Option<Arc<Lut>>>>> = OnceLock::new();
+    let mut cache = CACHE.get_or_init(Default::default).lock().ok()?;
+    cache.entry(path.to_string()).or_insert_with(|| std::fs::read_to_string(path).ok().and_then(|text| Lut::parse(&text)).map(Arc::new)).clone()
+}
+
+fn convolve(image: &Image, kernel: [f32; 9], keep_alpha: bool) -> Image {
+    let (width, height) = (image.width, image.height);
+    let mut pixels = image.pixels.clone();
+    pixels.par_chunks_mut(width.max(1) * 4).enumerate().for_each(|(row, line)| {
+        for column in 0..width {
+            for channel in 0..3 {
+                let mut sum = 0.0;
+                for dy in 0..3usize {
+                    for dx in 0..3usize {
+                        let y = (row + dy).saturating_sub(1).min(height - 1);
+                        let x = (column + dx).saturating_sub(1).min(width - 1);
+                        sum += image.pixels[(y * width + x) * 4 + channel] as f32 * kernel[dy * 3 + dx];
+                    }
+                }
+                line[column * 4 + channel] = sum.clamp(0.0, 255.0) as u8;
+            }
+            if !keep_alpha {
+                line[column * 4 + 3] = 255;
+            }
+        }
+    });
+    Image { width, height, pixels }
+}
+
+fn glow(image: &Image, amount: f32) -> Image {
+    let soft = blur(image, 6);
+    let mut pixels = image.pixels.clone();
+    for (pixel, halo) in pixels.chunks_exact_mut(4).zip(soft.pixels.chunks_exact(4)) {
+        for channel in 0..3 {
+            pixel[channel] = (pixel[channel] as f32 + halo[channel] as f32 * amount).min(255.0) as u8;
+        }
+    }
+    Image { width: image.width, height: image.height, pixels }
 }
 
 struct Resolved {
@@ -59,6 +131,8 @@ struct Resolved {
     mask: voidedit_core::Mask,
     wipe_x: f32,
     wipe_y: f32,
+    lut: Option<Arc<Lut>>,
+    wave: (f32, f32),
 }
 
 fn blend(mode: Blend, base: f32, top: f32) -> f32 {
@@ -143,6 +217,21 @@ fn apply(ops: &[Op], mut color: [f32; 3]) -> [f32; 3] {
                 }
             }
             Op::Threshold(level) => color = [if luma(color) >= level { 255.0 } else { 0.0 }; 3],
+            Op::Wheels(lift, gamma, gain) => {
+                for index in 0..3 {
+                    let value = (color[index] / 255.0 * gain[index] + lift[index]).max(0.0);
+                    color[index] = value.powf(1.0 / gamma[index].max(0.05)) * 255.0;
+                }
+            }
+            Op::Curve(shadows, midtones, highlights) => {
+                color = color.map(|channel| {
+                    let t = (channel / 255.0).clamp(0.0, 1.0);
+                    let low = (1.0 - t) * (1.0 - t);
+                    let mid = 2.0 * t * (1.0 - t);
+                    let high = t * t;
+                    channel + (low * shadows + mid * midtones + high * highlights) * 1.27
+                });
+            }
         }
     }
     color
@@ -294,6 +383,9 @@ fn resolve(clip: &Clip, frame: f32, scale: f32, image: Option<Arc<Image>>) -> Op
             Effect::Blur { radius: value } => radius = value.at(frame).max(0.0),
             Effect::FlipHorizontal => flip_x = !flip_x,
             Effect::FlipVertical => flip_y = !flip_y,
+            Effect::ColorWheels { lift, gamma, gain } => ops.push(Op::Wheels(*lift, *gamma, *gain)),
+            Effect::Curves { shadows, midtones, highlights } => ops.push(Op::Curve(shadows.at(frame), midtones.at(frame), highlights.at(frame))),
+            Effect::Lut { .. } | Effect::Sharpen { .. } | Effect::Glow { .. } | Effect::EdgeDetect | Effect::DropShadow { .. } | Effect::Wave { .. } => {}
             Effect::HueShift { degrees } => ops.push(Op::Hue(degrees.at(frame).to_radians())),
             Effect::Gamma { amount } => ops.push(Op::Gamma(1.0 / amount.at(frame).max(0.05))),
             Effect::Levels { black, white } => ops.push(Op::Levels(black.at(frame), white.at(frame))),
@@ -302,11 +394,36 @@ fn resolve(clip: &Clip, frame: f32, scale: f32, image: Option<Arc<Image>>) -> Op
             Effect::Noise { .. } | Effect::ChromaKey { .. } => {}
         }
     }
-    let image = match (image, radius as usize) {
+    let mut image = match (image, radius as usize) {
         (Some(image), 0) => Some(image),
         (Some(image), radius) => Some(Arc::new(blur(&image, radius.min(64)))),
         (None, _) => None,
     };
+    let mut lut = None;
+    let mut wave = (0.0, 0.0);
+    for effect in &clip.effects {
+        match effect {
+            Effect::Lut { path } if !path.is_empty() => lut = load_lut(path),
+            Effect::Wave { amplitude, frequency } => wave = (amplitude.at(frame) * scale, frequency.at(frame)),
+            Effect::Sharpen { amount } => {
+                if let Some(current) = &image {
+                    let a = amount.at(frame).clamp(0.0, 200.0) / 100.0;
+                    image = Some(Arc::new(convolve(current, [0.0, -a, 0.0, -a, 1.0 + 4.0 * a, -a, 0.0, -a, 0.0], true)));
+                }
+            }
+            Effect::Glow { amount } => {
+                if let Some(current) = &image {
+                    image = Some(Arc::new(glow(current, amount.at(frame).clamp(0.0, 200.0) / 100.0)));
+                }
+            }
+            Effect::EdgeDetect => {
+                if let Some(current) = &image {
+                    image = Some(Arc::new(convolve(current, [-1.0, -1.0, -1.0, -1.0, 8.0, -1.0, -1.0, -1.0, -1.0], false)));
+                }
+            }
+            _ => {}
+        }
+    }
     let mut noise = 0.0;
     let mut key = None;
     for effect in &clip.effects {
@@ -358,6 +475,8 @@ fn resolve(clip: &Clip, frame: f32, scale: f32, image: Option<Arc<Image>>) -> Op
         mask: clip.mask.clone(),
         wipe_x,
         wipe_y,
+        lut,
+        wave,
     })
 }
 
@@ -391,7 +510,10 @@ fn sample(layer: &Resolved, lx: f32, ly: f32) -> Option<([f32; 3], f32)> {
 
 fn draw(layer: &Resolved, px: f32, py: f32) -> Option<([f32; 3], f32)> {
     let (dx, dy) = (px - layer.x, py - layer.y);
-    let (lx, ly) = (dx * layer.cos - dy * layer.sin, dx * layer.sin + dy * layer.cos);
+    let (mut lx, ly) = (dx * layer.cos - dy * layer.sin, dx * layer.sin + dy * layer.cos);
+    if layer.wave.0 != 0.0 && layer.half_h > 0.0 {
+        lx += layer.wave.0 * (ly / layer.half_h * layer.wave.1).sin();
+    }
     if layer.half_w <= 0.0 || layer.half_h <= 0.0 {
         return None;
     }
@@ -425,6 +547,9 @@ fn draw(layer: &Resolved, px: f32, py: f32) -> Option<([f32; 3], f32)> {
         let falloff = 1.0 - layer.vignette * ((nx * nx + ny * ny) / 2.0).min(1.0);
         color = color.map(|channel| channel * falloff);
     }
+    if let Some(lut) = &layer.lut {
+        color = lut.apply(color);
+    }
     if layer.noise > 0.0 {
         let seed = (px as u32).wrapping_mul(73_856_093) ^ (py as u32).wrapping_mul(19_349_663) ^ (layer.x as u32).wrapping_mul(83_492_791);
         let grain = (seed.wrapping_mul(seed | 1) >> 24) as f32 / 255.0 - 0.5;
@@ -455,7 +580,39 @@ pub fn render(project: &Project, frame: u32, scale: f32, target: &mut Frame, ima
                 (None, Some(path)) => Some(images(path)?),
                 (None, None) => None,
             };
-            resolve(clip, time, scale, image)
+            let main = resolve(clip, time, scale, image)?;
+            Some((clip, main))
+        })
+        .flat_map(|(clip, main)| {
+            let shadow = clip.effects.iter().find_map(|effect| match effect {
+                Effect::DropShadow { x, y, opacity } => Some(Resolved {
+                    image: main.image.clone(),
+                    cos: main.cos,
+                    sin: main.sin,
+                    x: main.x + x.at(time) * scale,
+                    y: main.y + y.at(time) * scale,
+                    half_w: main.half_w,
+                    half_h: main.half_h,
+                    shape: main.shape,
+                    color: [0.0; 3],
+                    opacity: main.opacity * opacity.at(time).clamp(0.0, 100.0) / 100.0,
+                    ops: vec![Op::Gain(0.0)],
+                    vignette: 0.0,
+                    pixelate: 0.0,
+                    flip_x: main.flip_x,
+                    flip_y: main.flip_y,
+                    blend: Blend::Normal,
+                    noise: 0.0,
+                    key: main.key,
+                    mask: main.mask.clone(),
+                    wipe_x: main.wipe_x,
+                    wipe_y: main.wipe_y,
+                    lut: None,
+                    wave: main.wave,
+                }),
+                _ => None,
+            });
+            shadow.into_iter().chain(std::iter::once(main))
         })
         .collect();
     let background = project.background.map(|channel| channel as f32);
@@ -525,6 +682,14 @@ mod tests {
             let image = Arc::new(Image { width: 8, height: 8, pixels: vec![120; 256] });
             render(&project, 0, 1.0, &mut Frame::default(), &|_| Some(image.clone()));
         }
+    }
+
+    #[test]
+    fn cube_luts_parse_and_apply() {
+        let text = "LUT_3D_SIZE 2\n0 0 0\n1 0 0\n0 1 0\n1 1 0\n0 0 1\n1 0 1\n0 1 1\n1 1 1\n";
+        let lut = Lut::parse(text).unwrap();
+        assert_eq!(lut.apply([255.0, 0.0, 0.0]), [255.0, 0.0, 0.0]);
+        assert!(Lut::parse("LUT_3D_SIZE 2\n0 0 0").is_none());
     }
 
     #[test]

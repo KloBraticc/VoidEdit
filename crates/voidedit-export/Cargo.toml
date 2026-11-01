@@ -8,6 +8,7 @@ license.workspace = true
 voidedit-core.workspace = true
 voidedit-render.workspace = true
 voidedit-media.workspace = true
+image = { version = "0.25", default-features = false, features = ["png"] }
 filmcraft-h264enc = { git = "https://github.com/storytold/filmcraft", rev = "5ed4952" }
 filmcraft-aac = { git = "https://github.com/storytold/filmcraft", rev = "5ed4952" }
 filmcraft-isobmff = { git = "https://github.com/storytold/filmcraft", rev = "5ed4952" }

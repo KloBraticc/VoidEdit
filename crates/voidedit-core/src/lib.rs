@@ -107,6 +107,14 @@ pub enum Effect {
     Threshold { level: Param },
     Noise { amount: Param },
     ChromaKey { color: [u8; 3], tolerance: Param, softness: Param },
+    ColorWheels { lift: [f32; 3], gamma: [f32; 3], gain: [f32; 3] },
+    Curves { shadows: Param, midtones: Param, highlights: Param },
+    Lut { path: String },
+    Sharpen { amount: Param },
+    Glow { amount: Param },
+    EdgeDetect,
+    DropShadow { x: Param, y: Param, opacity: Param },
+    Wave { amplitude: Param, frequency: Param },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -164,7 +172,8 @@ impl Default for Mask {
     }
 }
 
-pub const EFFECT_NAMES: [&str; 22] = [
+pub const EFFECT_NAMES: [&str; 30] = [
+    "Color Wheels", "Curves", "LUT", "Sharpen", "Glow", "Edge Detect", "Drop Shadow", "Wave",
     "Hue Shift", "Gamma", "Levels", "Color Balance", "Threshold", "Noise", "Chroma Key",
     "Brightness", "Tint", "Invert", "Grayscale", "Sepia", "Contrast", "Saturation", "Exposure", "Temperature", "Posterize", "Vignette", "Pixelate", "Blur", "Flip Horizontal", "Flip Vertical",
 ];
@@ -187,6 +196,14 @@ impl Effect {
             "Blur" => Effect::Blur { radius: Param::new(8.0) },
             "Flip Horizontal" => Effect::FlipHorizontal,
             "Flip Vertical" => Effect::FlipVertical,
+            "Color Wheels" => Effect::ColorWheels { lift: [0.0; 3], gamma: [1.0; 3], gain: [1.0; 3] },
+            "Curves" => Effect::Curves { shadows: Param::new(0.0), midtones: Param::new(0.0), highlights: Param::new(0.0) },
+            "LUT" => Effect::Lut { path: String::new() },
+            "Sharpen" => Effect::Sharpen { amount: Param::new(50.0) },
+            "Glow" => Effect::Glow { amount: Param::new(40.0) },
+            "Edge Detect" => Effect::EdgeDetect,
+            "Drop Shadow" => Effect::DropShadow { x: Param::new(12.0), y: Param::new(12.0), opacity: Param::new(60.0) },
+            "Wave" => Effect::Wave { amplitude: Param::new(10.0), frequency: Param::new(8.0) },
             "Hue Shift" => Effect::HueShift { degrees: Param::new(0.0) },
             "Gamma" => Effect::Gamma { amount: Param::new(1.0) },
             "Levels" => Effect::Levels { black: Param::new(0.0), white: Param::new(255.0) },
@@ -215,6 +232,14 @@ impl Effect {
             Effect::Blur { .. } => "Blur",
             Effect::FlipHorizontal => "Flip Horizontal",
             Effect::FlipVertical => "Flip Vertical",
+            Effect::ColorWheels { .. } => "Color Wheels",
+            Effect::Curves { .. } => "Curves",
+            Effect::Lut { .. } => "LUT",
+            Effect::Sharpen { .. } => "Sharpen",
+            Effect::Glow { .. } => "Glow",
+            Effect::EdgeDetect => "Edge Detect",
+            Effect::DropShadow { .. } => "Drop Shadow",
+            Effect::Wave { .. } => "Wave",
             Effect::HueShift { .. } => "Hue Shift",
             Effect::Gamma { .. } => "Gamma",
             Effect::Levels { .. } => "Levels",
@@ -272,6 +297,14 @@ pub struct Clip {
     pub text_stroke: f32,
     #[serde(default)]
     pub text_background: bool,
+    #[serde(default)]
+    pub muted: bool,
+    #[serde(default)]
+    pub pan: f32,
+    #[serde(default)]
+    pub bass: f32,
+    #[serde(default)]
+    pub treble: f32,
 }
 
 fn default_text_size() -> f32 {
@@ -477,6 +510,10 @@ impl Project {
             mask: Mask::default(),
             text_stroke: 0.0,
             text_background: false,
+            muted: false,
+            pan: 0.0,
+            bass: 0.0,
+            treble: 0.0,
         }
     }
 

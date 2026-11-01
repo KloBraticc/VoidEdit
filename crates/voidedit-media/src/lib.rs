@@ -166,6 +166,9 @@ pub struct AudioClip {
     pub offset: f64,
     pub gain: Gain,
     pub speed: f32,
+    pub pan: f32,
+    pub bass: f32,
+    pub treble: f32,
 }
 
 #[derive(Clone)]
@@ -306,12 +309,19 @@ pub fn mix(library: &Library, clips: &[AudioClip], start: i64, frames: usize, ra
         let left = buffer.channels.first();
         let right = buffer.channels.get(1).or(left);
         if let (Some(left), Some(right)) = (left, right) {
+            let (pan_left, pan_right) = ((1.0 - clip.pan).min(1.0), (1.0 + clip.pan).min(1.0));
+            let (bass, treble) = (10f32.powf(clip.bass / 20.0), 10f32.powf(clip.treble / 20.0));
+            let (mut low_left, mut low_right) = (0.0f32, 0.0f32);
             for index in 0..frames {
                 let source_index = (index as f64 * speed) as usize;
                 let (Some(l), Some(r)) = (left.get(source_index), right.get(source_index)) else { break };
                 let gain = clip.gain.at(time + index as f64 / rate as f64);
-                mixed[index * 2] += l * gain;
-                mixed[index * 2 + 1] += r * gain;
+                low_left += (l - low_left) * 0.05;
+                low_right += (r - low_right) * 0.05;
+                let shaped_left = low_left * bass + (l - low_left) * treble;
+                let shaped_right = low_right * bass + (r - low_right) * treble;
+                mixed[index * 2] += shaped_left * gain * pan_left;
+                mixed[index * 2 + 1] += shaped_right * gain * pan_right;
             }
         }
     }

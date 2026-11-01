@@ -9,7 +9,7 @@ use std::time::Instant;
 use eframe::egui::{self, Color32, Pos2, Rect, RichText, Sense, Stroke, Vec2};
 use settings::Settings;
 use voidedit_core::{timecode, Clip, Effect, History, MaskShape, Param, Project, Shape, TrackKind, BLENDS, EFFECT_NAMES, TRANSITIONS};
-use voidedit_export::{audio_clips, export, Progress};
+use voidedit_export::{audio_clips, export_with, ExportFormat, ExportOptions, Progress};
 use voidedit_media::{waveform, Audio, FrameWant, Frames, Library};
 use voidedit_render::{render, wanted_frame, Frame};
 
@@ -76,6 +76,12 @@ pub struct App {
     update_status: Arc<Mutex<String>>,
     settings: Settings,
     show_settings: bool,
+    show_shortcuts: bool,
+    show_export: bool,
+    options: ExportOptions,
+    show_project: bool,
+    show_controls: bool,
+    show_timeline: bool,
     job: Option<ExportJob>,
     context: egui::Context,
 }
@@ -120,6 +126,12 @@ impl App {
             update_status,
             settings,
             show_settings: false,
+            show_shortcuts: false,
+            show_export: false,
+            options: ExportOptions::default(),
+            show_project: true,
+            show_controls: true,
+            show_timeline: true,
             job: None,
             context: ctx.clone(),
         };
@@ -351,14 +363,22 @@ impl App {
             self.status = "Add a clip before exporting".into();
             return;
         }
-        let Some(path) = rfd::FileDialog::new().add_filter("MP4 video", &["mp4"]).set_file_name("Export.mp4").save_file() else {
+        let dialog = rfd::FileDialog::new();
+        let chosen = match self.options.format {
+            ExportFormat::Mp4 => dialog.add_filter("MP4 video", &["mp4"]).set_file_name("Export.mp4").save_file(),
+            ExportFormat::Wav => dialog.add_filter("WAV audio", &["wav"]).set_file_name("Export.wav").save_file(),
+            ExportFormat::PngSequence => dialog.pick_folder(),
+        };
+        let Some(path) = chosen else {
             return;
         };
+        self.show_export = false;
+        let options = self.options;
         let progress = Arc::new(Progress::default());
         let result = Arc::new(Mutex::new(None));
         let (project, library, shared, finished, repaint) = (self.project.clone(), self.library.clone(), progress.clone(), result.clone(), self.context.clone());
         let spawned = std::thread::Builder::new().name("export".into()).spawn(move || {
-            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| export(&project, &library, &path, &shared))).unwrap_or_else(|_| Err("the export stopped unexpectedly".into()));
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| export_with(&project, &library, &path, options, &shared))).unwrap_or_else(|_| Err("the export stopped unexpectedly".into()));
             if let Ok(mut slot) = finished.lock() {
                 *slot = Some(outcome);
             }
@@ -409,7 +429,7 @@ impl App {
             self.import();
         }
         if command(egui::Key::M) {
-            self.start_export();
+            self.show_export = true;
         }
         if plain(egui::Key::Space) {
             self.playing = !self.playing;
@@ -498,7 +518,7 @@ impl App {
                         ("Save", |app| app.save(false)),
                         ("Save As...", |app| app.save(true)),
                         ("Import Media...", App::import),
-                        ("Export Video...", App::start_export),
+                        ("Export...", |app| app.show_export = true),
                     ];
                     for (label, action) in items {
                         if ui.button(label).clicked() {
@@ -564,6 +584,20 @@ impl App {
                         ui.color_edit_button_srgb(&mut self.project.background);
                     });
                 });
+                ui.menu_button("View", |ui| {
+                    ui.checkbox(&mut self.show_project, "Project panel");
+                    ui.checkbox(&mut self.show_controls, "Effect Controls panel");
+                    ui.checkbox(&mut self.show_timeline, "Timeline");
+                    if ui.button("Fit timeline").clicked() {
+                        self.scroll = 0.0;
+                        self.zoom = (1100.0 / self.project.end_frame().max(30) as f32).clamp(0.2, 60.0);
+                        ui.close_menu();
+                    }
+                    if ui.button("Keyboard shortcuts").clicked() {
+                        self.show_shortcuts = true;
+                        ui.close_menu();
+                    }
+                });
                 if ui.button("Settings").clicked() {
                     self.show_settings = true;
                 }
@@ -571,7 +605,7 @@ impl App {
                 let changed = self.project != self.committed;
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.add(egui::Button::new(RichText::new("Export").color(Color32::WHITE)).fill(self.accent())).clicked() {
-                        self.start_export();
+                        self.show_export = true;
                     }
                     ui.label(RichText::new(if changed { format!("{name} *") } else { name }).weak());
                     if let Ok(update) = self.update_status.lock() {
@@ -609,6 +643,38 @@ impl App {
             self.settings.save();
             self.apply_style();
         }
+        let mut go = false;
+        let mut show_export = self.show_export;
+        egui::Window::new("Export").open(&mut show_export).collapsible(false).resizable(false).show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                for (label, format) in [("MP4 video", ExportFormat::Mp4), ("PNG images", ExportFormat::PngSequence), ("WAV audio", ExportFormat::Wav)] {
+                    ui.selectable_value(&mut self.options.format, format, label);
+                }
+            });
+            if self.options.format != ExportFormat::Wav {
+                ui.add(egui::Slider::new(&mut self.options.scale, 0.1..=1.0).text("Resolution"));
+                let (width, height) = (self.project.width as f32 * self.options.scale, self.project.height as f32 * self.options.scale);
+                ui.label(RichText::new(format!("{} x {}", width as u32 & !1, height as u32 & !1)).weak());
+            }
+            if self.options.format == ExportFormat::Mp4 {
+                ui.add(egui::Slider::new(&mut self.options.quality, 40.0..=10.0).text("Quality"));
+            }
+            go = ui.button("Export").clicked();
+        });
+        self.show_export = show_export;
+        if go {
+            self.start_export();
+        }
+        let mut show_shortcuts = self.show_shortcuts;
+        egui::Window::new("Keyboard shortcuts").open(&mut show_shortcuts).collapsible(false).show(ctx, |ui| {
+            for (key, action) in [("Space", "Play or pause"), ("Left, Right", "Move one frame"), ("Up, Down", "Previous or next edit"), ("V", "Selection tool"), ("C", "Razor tool"), ("T", "New text"), ("M", "Marker"), ("Delete", "Delete clip"), ("Shift Delete", "Ripple delete"), ("Ctrl K", "Split at playhead"), ("Ctrl C, V, D", "Copy, paste, duplicate"), ("Ctrl Z", "Undo"), ("Ctrl Shift Z", "Redo"), ("Ctrl S", "Save"), ("Ctrl I", "Import"), ("Ctrl M", "Export"), ("Ctrl Scroll", "Zoom the timeline")] {
+                ui.horizontal(|ui| {
+                    ui.add_sized([120.0, 16.0], egui::Label::new(RichText::new(key).monospace()));
+                    ui.label(action);
+                });
+            }
+        });
+        self.show_shortcuts = show_shortcuts;
         let mut finished = None;
         if let Some(job) = &self.job {
             let (done, total) = (job.progress.done.load(Ordering::Relaxed), job.progress.total.load(Ordering::Relaxed).max(1));
@@ -828,6 +894,10 @@ impl App {
                     if ui.add(egui::Slider::new(&mut volume, 0.0..=200.0).text("Volume")).changed() {
                         clip.volume.base = volume;
                     }
+                    ui.checkbox(&mut clip.muted, "Mute clip");
+                    ui.add(egui::Slider::new(&mut clip.pan, -1.0..=1.0).text("Pan"));
+                    ui.add(egui::Slider::new(&mut clip.bass, -12.0..=12.0).text("Bass"));
+                    ui.add(egui::Slider::new(&mut clip.treble, -12.0..=12.0).text("Treble"));
                 });
             } else {
                 ui.horizontal(|ui| {
@@ -855,6 +925,37 @@ impl App {
                         Effect::Posterize { levels } => Self::param(ui, accent, "Levels", levels, frame, 0.1),
                         Effect::Pixelate { size } => Self::param(ui, accent, "Size", size, frame, 0.25),
                         Effect::Blur { radius } => Self::param(ui, accent, "Radius", radius, frame, 0.25),
+                        Effect::ColorWheels { lift, gamma, gain } => {
+                            for (name, wheel, low, high) in [("Lift", lift, -0.5, 0.5), ("Gamma", gamma, 0.2, 3.0), ("Gain", gain, 0.0, 3.0)] {
+                                ui.label(name);
+                                for (channel, label) in wheel.iter_mut().zip(["R", "G", "B"]) {
+                                    ui.add(egui::Slider::new(channel, low..=high).text(label));
+                                }
+                            }
+                        }
+                        Effect::Curves { shadows, midtones, highlights } => {
+                            Self::param(ui, accent, "Shadows", shadows, frame, 0.5);
+                            Self::param(ui, accent, "Midtones", midtones, frame, 0.5);
+                            Self::param(ui, accent, "Highlights", highlights, frame, 0.5);
+                        }
+                        Effect::Lut { path } => {
+                            if ui.button(if path.is_empty() { "Choose .cube file" } else { path.as_str() }).clicked() {
+                                if let Some(file) = rfd::FileDialog::new().add_filter("LUT", &["cube"]).pick_file() {
+                                    *path = file.to_string_lossy().into_owned();
+                                }
+                            }
+                        }
+                        Effect::Sharpen { amount } | Effect::Glow { amount } => Self::param(ui, accent, "Amount", amount, frame, 0.5),
+                        Effect::DropShadow { x, y, opacity } => {
+                            Self::param(ui, accent, "Offset X", x, frame, 0.5);
+                            Self::param(ui, accent, "Offset Y", y, frame, 0.5);
+                            Self::param(ui, accent, "Opacity", opacity, frame, 0.5);
+                        }
+                        Effect::Wave { amplitude, frequency } => {
+                            Self::param(ui, accent, "Amplitude", amplitude, frame, 0.5);
+                            Self::param(ui, accent, "Frequency", frequency, frame, 0.1);
+                        }
+                        Effect::EdgeDetect => {}
                         Effect::HueShift { degrees } => Self::param(ui, accent, "Degrees", degrees, frame, 1.0),
                         Effect::Gamma { amount } => Self::param(ui, accent, "Gamma", amount, frame, 0.01),
                         Effect::Levels { black, white } => {
@@ -1176,7 +1277,7 @@ impl eframe::App for App {
         self.autosave();
         self.menu(ctx);
         self.windows(ctx);
-        egui::TopBottomPanel::bottom("timeline").resizable(true).default_height(330.0).min_height(120.0).show(ctx, |ui| {
+        egui::TopBottomPanel::bottom("timeline").resizable(true).default_height(330.0).min_height(120.0).show_animated(ctx, self.show_timeline, |ui| {
             ui.horizontal_top(|ui| {
                 self.tools(ui);
                 let meter = Vec2::new(16.0, ui.available_height());
@@ -1188,8 +1289,8 @@ impl eframe::App for App {
                 painter.rect_filled(level, 3.0_f32, Color32::from_rgb(70, 210, 110));
             });
         });
-        egui::SidePanel::left("project").resizable(true).default_width(290.0).show(ctx, |ui| self.left_panel(ui));
-        egui::SidePanel::right("controls").resizable(true).default_width(330.0).show(ctx, |ui| self.controls_panel(ui));
+        egui::SidePanel::left("project").resizable(true).default_width(290.0).show_animated(ctx, self.show_project, |ui| self.left_panel(ui));
+        egui::SidePanel::right("controls").resizable(true).default_width(330.0).show_animated(ctx, self.show_controls, |ui| self.controls_panel(ui));
         egui::CentralPanel::default().show(ctx, |ui| self.monitor(ui));
         if !ctx.input(|i| i.pointer.any_down()) && self.project != self.committed {
             let before = std::mem::replace(&mut self.committed, self.project.clone());
