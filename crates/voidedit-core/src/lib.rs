@@ -115,6 +115,7 @@ pub enum Effect {
     Solarize { level: Param },
     Vibrance { amount: Param },
     Duotone { dark: [u8; 3], light: [u8; 3] },
+    Library { id: String, name: String, values: std::collections::BTreeMap<String, LibValue> },
     Mirror,
     MotionBlur { length: Param },
     ZoomBlur { amount: Param },
@@ -146,6 +147,21 @@ pub enum Effect {
     EdgeDetect,
     DropShadow { x: Param, y: Param, opacity: Param },
     Wave { amplitude: Param, frequency: Param },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum LibValue {
+    Number(Param),
+    Point(Param, Param),
+    Color([f32; 4]),
+    Check(bool),
+    Choice(u32),
+}
+
+pub struct RgbaImage {
+    pub width: usize,
+    pub height: usize,
+    pub pixels: Vec<u8>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -294,8 +310,9 @@ impl Effect {
         })
     }
 
-    pub fn name(&self) -> &'static str {
+    pub fn name(&self) -> &str {
         match self {
+            Effect::Library { name, .. } => name,
             Effect::Brightness { .. } => "Brightness",
             Effect::Tint { .. } => "Tint",
             Effect::Invert => "Invert",

@@ -1,0 +1,12 @@
+[package]
+name = "voidedit-fx"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+voidedit-core.workspace = true
+effectcraft-effects = { git = "https://github.com/storytold/effectcraft", rev = "e71dd62" }
+effectcraft-keyframe = { git = "https://github.com/storytold/effectcraft", rev = "e71dd62" }
+effectcraft-project = { git = "https://github.com/storytold/effectcraft", rev = "e71dd62" }
+effectcraft-raster = { git = "https://github.com/storytold/effectcraft", rev = "e71dd62" }

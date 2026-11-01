@@ -7,4 +7,5 @@ license.workspace = true
 [dependencies]
 voidedit-core.workspace = true
 rayon.workspace = true
+voidedit-fx.workspace = true
 ab_glyph = "0.2"

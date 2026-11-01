@@ -1140,6 +1140,28 @@ impl App {
                         ui.label(RichText::new("Select a clip to add effects").weak());
                     }
                     ui.separator();
+                    ui.strong("Effect Library");
+                    let library = voidedit_fx::list();
+                    let mut categories: Vec<&str> = library.iter().map(|info| info.category).collect();
+                    categories.sort_unstable();
+                    categories.dedup();
+                    for category in categories {
+                        let matches: Vec<&voidedit_fx::FxInfo> = library.iter().filter(|info| info.category == category && (filter.is_empty() || info.name.to_lowercase().contains(&filter))).collect();
+                        if matches.is_empty() {
+                            continue;
+                        }
+                        egui::CollapsingHeader::new(format!("{category} ({})", matches.len())).default_open(!filter.is_empty()).show(ui, |ui| {
+                            for info in matches {
+                                if ui.add_enabled(selected.is_some(), egui::Button::new(info.name).min_size(Vec2::new(ui.available_width(), 22.0))).clicked() {
+                                    if let Some(clip) = selected.and_then(|index| self.project.clips.get_mut(index)) {
+                                        let size = [clip.width as f64, clip.height as f64];
+                                        clip.effects.push(Effect::Library { id: info.id.to_string(), name: info.name.to_string(), values: voidedit_fx::defaults(info.id, size) });
+                                    }
+                                }
+                            }
+                        });
+                    }
+                    ui.separator();
                     ui.strong("Looks");
                     for name in LOOKS {
                         if !filter.is_empty() && !name.to_lowercase().contains(&filter) {
@@ -1365,6 +1387,38 @@ impl App {
                             Self::param(ui, accent, "Frequency", frequency, frame, 0.1);
                         }
                         Effect::EdgeDetect | Effect::Mirror | Effect::Emboss | Effect::ChannelSwap | Effect::Sketch => {}
+                        Effect::Library { id, values, .. } => {
+                            for info in voidedit_fx::params(id) {
+                                let Some(value) = values.get_mut(info.id) else { continue };
+                                match (value, &info.kind) {
+                                    (voidedit_core::LibValue::Number(number), _) => Self::param(ui, accent, info.name, number, frame, 0.25),
+                                    (voidedit_core::LibValue::Point(x, y), _) => {
+                                        Self::param(ui, accent, &format!("{} X", info.name), x, frame, 1.0);
+                                        Self::param(ui, accent, &format!("{} Y", info.name), y, frame, 1.0);
+                                    }
+                                    (voidedit_core::LibValue::Color(color), _) => {
+                                        ui.horizontal(|ui| {
+                                            ui.label(info.name);
+                                            ui.color_edit_button_rgba_unmultiplied(color);
+                                        });
+                                    }
+                                    (voidedit_core::LibValue::Check(state), _) => {
+                                        ui.checkbox(state, info.name);
+                                    }
+                                    (voidedit_core::LibValue::Choice(choice), voidedit_fx::ParamKind::Choice(options)) => {
+                                        let shown = options.get((*choice as usize).saturating_sub(1)).cloned().unwrap_or_default();
+                                        egui::ComboBox::from_label(info.name).selected_text(shown).show_ui(ui, |ui| {
+                                            for (position, option) in options.iter().enumerate() {
+                                                ui.selectable_value(choice, position as u32 + 1, option);
+                                            }
+                                        });
+                                    }
+                                    (voidedit_core::LibValue::Choice(choice), _) => {
+                                        ui.add(egui::DragValue::new(choice).prefix(format!("{} ", info.name)));
+                                    }
+                                }
+                            }
+                        }
                         Effect::MotionBlur { length } => Self::param(ui, accent, "Length", length, frame, 0.25),
                         Effect::ZoomBlur { amount } => Self::param(ui, accent, "Amount", amount, frame, 0.5),
                         Effect::Ripple { amount, frequency } => {

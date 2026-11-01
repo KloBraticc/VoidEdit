@@ -156,6 +156,22 @@ pub struct Warp {
     pub border: Option<(f32, [f32; 3])>,
 }
 
+fn shape_image(clip: &Clip) -> Image {
+    const MAX_SIDE: f32 = 2048.0;
+    let ratio = (MAX_SIDE / clip.width.max(clip.height).max(1.0)).min(1.0);
+    let width = ((clip.width * ratio) as usize).max(1);
+    let height = ((clip.height * ratio) as usize).max(1);
+    let mut pixels = vec![0u8; width * height * 4];
+    for (index, pixel) in pixels.chunks_exact_mut(4).enumerate() {
+        let (x, y) = (index % width, index / width);
+        let (nx, ny) = (x as f32 / width as f32 * 2.0 - 1.0, y as f32 / height as f32 * 2.0 - 1.0);
+        let inside = clip.shape != Shape::Ellipse || nx * nx + ny * ny <= 1.0;
+        pixel[..3].copy_from_slice(&clip.color);
+        pixel[3] = if inside { 255 } else { 0 };
+    }
+    Image { width, height, pixels }
+}
+
 fn zoom_blur(image: &Image, amount: f32) -> Image {
     const STEPS: usize = 8;
     let (width, height) = (image.width, image.height);
@@ -603,6 +619,7 @@ fn resolve(clip: &Clip, frame: f32, scale: f32, image: Option<Arc<Image>>) -> Op
             Effect::Duotone { dark, light } => ops.push(Op::Duotone(dark.map(|channel| channel as f32), light.map(|channel| channel as f32))),
             Effect::Mirror => mirror = true,
             Effect::ChannelSwap => ops.push(Op::Swap),
+            Effect::Library { .. } => {}
             Effect::MotionBlur { .. } | Effect::ZoomBlur { .. } | Effect::Ripple { .. } | Effect::Tile { .. } => {}
             Effect::Letterbox { .. } | Effect::GradientOverlay { .. } | Effect::Border { .. } | Effect::Sketch => {}
             Effect::Emboss | Effect::ChromaticAberration { .. } | Effect::Scanlines { .. } | Effect::Swirl { .. } | Effect::Kaleidoscope { .. } | Effect::Fisheye { .. } => {}
@@ -651,6 +668,13 @@ fn resolve(clip: &Clip, frame: f32, scale: f32, image: Option<Arc<Image>>) -> Op
                         pixel[..3].fill(gray);
                     }
                     image = Some(Arc::new(Image { width: edges.width, height: edges.height, pixels }));
+                }
+            }
+            Effect::Library { id, values, .. } => {
+                let source = image.clone().unwrap_or_else(|| Arc::new(shape_image(clip)));
+                let input = voidedit_core::RgbaImage { width: source.width, height: source.height, pixels: source.pixels.clone() };
+                if let Some(result) = voidedit_fx::apply(id, values, frame, 30.0, 1, &input) {
+                    image = Some(Arc::new(Image { width: result.width, height: result.height, pixels: result.pixels }));
                 }
             }
             Effect::MotionBlur { length } => {
