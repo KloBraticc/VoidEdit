@@ -6,6 +6,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use egui_dock::{DockArea, DockState, NodeIndex, Style, TabViewer};
 use eframe::egui::{self, Color32, Pos2, Rect, RichText, Sense, Stroke, Vec2};
 use settings::Settings;
 use voidedit_core::{timecode, Clip, Effect, History, MaskShape, Param, Project, Shape, TrackKind, BLENDS, EFFECT_NAMES, TRANSITIONS};
@@ -39,6 +40,67 @@ enum Drag {
     TrimEnd,
 }
 
+#[derive(Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+enum Pane {
+    Media,
+    Program,
+    Controls,
+    Timeline,
+}
+
+fn default_layout() -> DockState<Pane> {
+    let mut state = DockState::new(vec![Pane::Program]);
+    let surface = state.main_surface_mut();
+    let [top, _] = surface.split_below(NodeIndex::root(), 0.62, vec![Pane::Timeline]);
+    let [top, _] = surface.split_left(top, 0.2, vec![Pane::Media]);
+    let _ = top;
+    let program = surface.find_tab(&Pane::Program).map(|(node, _)| node).unwrap_or(NodeIndex::root());
+    surface.split_right(program, 0.72, vec![Pane::Controls]);
+    state
+}
+
+struct Viewer<'a> {
+    app: &'a mut App,
+}
+
+impl TabViewer for Viewer<'_> {
+    type Tab = Pane;
+
+    fn title(&mut self, tab: &mut Pane) -> egui::WidgetText {
+        match tab {
+            Pane::Media => "Project",
+            Pane::Program => "Program",
+            Pane::Controls => "Effect Controls",
+            Pane::Timeline => "Timeline",
+        }
+        .into()
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Pane) {
+        match tab {
+            Pane::Media => self.app.left_panel(ui),
+            Pane::Program => self.app.monitor(ui),
+            Pane::Controls => self.app.controls_panel(ui),
+            Pane::Timeline => {
+                ui.horizontal_top(|ui| {
+                    self.app.tools(ui);
+                    let meter = Vec2::new(16.0, ui.available_height());
+                    let timeline = Vec2::new((ui.available_width() - meter.x - 8.0).max(50.0), ui.available_height());
+                    ui.allocate_ui(timeline, |ui| self.app.timeline(ui));
+                    let (bar, painter) = ui.allocate_painter(meter, Sense::hover());
+                    painter.rect_filled(bar.rect, 3.0_f32, Color32::from_gray(18));
+                    let level = Rect::from_min_max(Pos2::new(bar.rect.left(), bar.rect.bottom() - bar.rect.height() * self.app.meter), bar.rect.max);
+                    painter.rect_filled(level, 3.0_f32, Color32::from_rgb(70, 210, 110));
+                });
+            }
+        }
+    }
+
+    fn closeable(&mut self, _tab: &mut Pane) -> bool {
+        false
+    }
+}
+
 struct TrackJob {
     points: Arc<Mutex<Vec<(u32, (i64, i64))>>>,
     done: Arc<std::sync::atomic::AtomicBool>,
@@ -67,11 +129,13 @@ pub struct App {
     playing: bool,
     last_tick: Instant,
     last_autosave: Instant,
+    last_layout_save: Instant,
     remainder: f32,
     selected: Option<usize>,
     clipboard: Option<Clip>,
     tool: Tool,
     left: LeftTab,
+    dock: Option<DockState<Pane>>,
     drawing_mask: bool,
     picking_track: bool,
     tracking: Option<TrackJob>,
@@ -102,9 +166,6 @@ pub struct App {
     show_shortcuts: bool,
     show_export: bool,
     options: ExportOptions,
-    show_project: bool,
-    show_controls: bool,
-    show_timeline: bool,
     job: Option<ExportJob>,
     context: egui::Context,
 }
@@ -126,11 +187,13 @@ impl App {
             playing: false,
             last_tick: Instant::now(),
             last_autosave: Instant::now(),
+            last_layout_save: Instant::now(),
             remainder: 0.0,
             selected: None,
             clipboard: None,
             tool: Tool::Select,
             left: LeftTab::Project,
+            dock: Some(Settings::folder().and_then(|folder| std::fs::read_to_string(folder.join("layout.json")).ok()).and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_else(default_layout)),
             drawing_mask: false,
             picking_track: false,
             tracking: None,
@@ -161,9 +224,6 @@ impl App {
             show_shortcuts: false,
             show_export: false,
             options: ExportOptions::default(),
-            show_project: true,
-            show_controls: true,
-            show_timeline: true,
             job: None,
             context: ctx.clone(),
         };
@@ -711,9 +771,10 @@ impl App {
                     });
                 });
                 ui.menu_button("View", |ui| {
-                    ui.checkbox(&mut self.show_project, "Project panel");
-                    ui.checkbox(&mut self.show_controls, "Effect Controls panel");
-                    ui.checkbox(&mut self.show_timeline, "Timeline");
+                    if ui.button("Reset panel layout").clicked() {
+                        self.dock = Some(default_layout());
+                        ui.close_menu();
+                    }
                     ui.checkbox(&mut self.show_mixer, "Audio mixer");
                     if ui.button("Fit timeline").clicked() {
                         self.scroll = 0.0;
@@ -979,9 +1040,6 @@ impl App {
     }
 
     fn controls_panel(&mut self, ui: &mut egui::Ui) {
-        self.tab(ui, true, "Effect Controls");
-        ui.add_space(4.0);
-        ui.separator();
         let frame = self.frame;
         let accent = self.accent();
         let names: Vec<String> = self.project.clips.iter().map(|clip| clip.name.clone()).collect();
@@ -1194,7 +1252,6 @@ impl App {
     }
 
     fn monitor(&mut self, ui: &mut egui::Ui) {
-        self.tab(ui, true, "Program");
         let controls = 60.0;
         let area = Vec2::new(ui.available_width(), (ui.available_height() - controls).max(40.0));
         let aspect = self.project.width as f32 / self.project.height as f32;
@@ -1508,21 +1565,22 @@ impl eframe::App for App {
         self.finish_tracking();
         self.menu(ctx);
         self.windows(ctx);
-        egui::TopBottomPanel::bottom("timeline").resizable(true).default_height(330.0).min_height(120.0).show_animated(ctx, self.show_timeline, |ui| {
-            ui.horizontal_top(|ui| {
-                self.tools(ui);
-                let meter = Vec2::new(16.0, ui.available_height());
-                let timeline = Vec2::new((ui.available_width() - meter.x - 8.0).max(50.0), ui.available_height());
-                ui.allocate_ui(timeline, |ui| self.timeline(ui));
-                let (bar, painter) = ui.allocate_painter(meter, Sense::hover());
-                painter.rect_filled(bar.rect, 3.0_f32, Color32::from_gray(18));
-                let level = Rect::from_min_max(Pos2::new(bar.rect.left(), bar.rect.bottom() - bar.rect.height() * self.meter), bar.rect.max);
-                painter.rect_filled(level, 3.0_f32, Color32::from_rgb(70, 210, 110));
-            });
-        });
-        egui::SidePanel::left("project").resizable(true).default_width(290.0).show_animated(ctx, self.show_project, |ui| self.left_panel(ui));
-        egui::SidePanel::right("controls").resizable(true).default_width(330.0).show_animated(ctx, self.show_controls, |ui| self.controls_panel(ui));
-        egui::CentralPanel::default().show(ctx, |ui| self.monitor(ui));
+        if let Some(mut dock) = self.dock.take() {
+            let mut style = Style::from_egui(ctx.style().as_ref());
+            style.tab_bar.fill_tab_bar = false;
+            DockArea::new(&mut dock).style(style).show(ctx, &mut Viewer { app: self });
+            if self.dock.is_none() {
+                self.dock = Some(dock);
+            }
+            if !ctx.input(|i| i.pointer.any_down()) && self.last_layout_save.elapsed().as_secs_f32() > 5.0 {
+                self.last_layout_save = Instant::now();
+                if let (Some(folder), Some(dock), true) = (Settings::folder(), &self.dock, true) {
+                    if let Ok(text) = serde_json::to_string(dock) {
+                        let _ = std::fs::write(folder.join("layout.json"), text);
+                    }
+                }
+            }
+        }
         if !ctx.input(|i| i.pointer.any_down()) && self.project != self.committed {
             let before = std::mem::replace(&mut self.committed, self.project.clone());
             self.history.record(before);
