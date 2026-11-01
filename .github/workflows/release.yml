@@ -31,7 +31,7 @@ jobs:
       - run: cargo build --release -p voidedit
       - run: cp ${{ matrix.source }} ${{ matrix.asset }}
         shell: bash
-      - run: gh release create ${{ github.ref_name }} --verify-tag --title ${{ github.ref_name }} --notes "" || true
+      - run: gh release create ${{ github.ref_name }} --verify-tag --title ${{ github.ref_name }} --notes "" ${{ contains(github.ref_name, '-') && '--prerelease' || '' }} || true
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
