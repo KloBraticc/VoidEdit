@@ -1176,7 +1176,7 @@ mod tests {
         project.clips.push(clip);
         project.motion_blur = voidedit_core::MotionBlur { enabled: true, samples: 16, shutter: 1.0 };
         let mut frame = Frame::default();
-        render_final(&project, 2, 1.0, &mut frame, &|_| None);
+        render_final(&project, 0, 1.0, &mut frame, &|_| None);
         let partial = frame.pixels.chunks_exact(4).filter(|pixel| pixel[0] > 10 && pixel[0] < 245).count();
         assert!(partial > 16, "{partial}");
     }
