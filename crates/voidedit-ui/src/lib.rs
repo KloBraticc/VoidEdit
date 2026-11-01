@@ -636,6 +636,10 @@ impl App {
     }
 
     pub fn open_path(&mut self, path: PathBuf) {
+        if !path.extension().is_some_and(|extension| extension == "voidedit") {
+            self.open_media_as_project(path);
+            return;
+        }
         match std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|t| Project::from_json(&t).map_err(|e| e.to_string())) {
             Ok(project) => {
                 self.project = project;
@@ -654,6 +658,37 @@ impl App {
                 }
             }
             Err(error) => self.status = format!("Could not open the project: {error}"),
+        }
+    }
+
+    fn open_media_as_project(&mut self, media: PathBuf) {
+        let project_path = media.with_extension("voidedit");
+        if project_path.is_file() {
+            self.open_path(project_path);
+            return;
+        }
+        if !media.is_file() {
+            self.status = "This file could not be opened".into();
+            return;
+        }
+        let file = media.to_string_lossy().into_owned();
+        self.new_project();
+        self.add_media(file.clone());
+        self.insert_media(&file);
+        if self.project.clips.is_empty() {
+            return;
+        }
+        self.committed = self.project.clone();
+        self.show_home = false;
+        self.selected = None;
+        match self.write_project(&project_path) {
+            Ok(()) => {
+                self.projects.record(&project_path, &self.project, true);
+                self.saved_project = Some(self.project.clone());
+                self.path = Some(project_path);
+                self.save_thumbnail();
+            }
+            Err(error) => self.status = format!("Could not save the project: {error}"),
         }
     }
 
