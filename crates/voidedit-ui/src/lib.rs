@@ -17,6 +17,7 @@ use voidedit_media::{decode_now, mono_samples, track_point, waveform, Audio, Fra
 use voidedit_render::{render, Frame};
 
 const HIT_CAPTION: usize = 2;
+const MAX_TEXTURE_SIDE: u32 = 2048;
 const HEADER_WIDTH: f32 = 240.0;
 const RULER_HEIGHT: f32 = 44.0;
 const TRACK_HEIGHT: f32 = 64.0;
@@ -106,6 +107,8 @@ pub struct App {
     show_strip: bool,
     show_inspector: bool,
     bin: usize,
+    applied_round: Option<bool>,
+    wallpaper_light: f32,
     show_home: bool,
     projects: home::Library,
     home: home::HomeState,
@@ -159,6 +162,13 @@ impl App {
     pub fn new(ctx: &egui::Context, update_status: Arc<Mutex<String>>) -> Self {
         let mut fonts = egui::FontDefinitions::default();
         egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
+        #[cfg(windows)]
+        if let Some(font) = std::env::var_os("WINDIR").and_then(|folder| std::fs::read(std::path::Path::new(&folder).join("Fonts").join("segoeui.ttf")).ok()) {
+            fonts.font_data.insert("system".to_string(), egui::FontData::from_owned(font).into());
+            if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+                family.insert(0, "system".to_string());
+            }
+        }
         ctx.set_fonts(fonts);
         let library = Library::default();
         let repaint = ctx.clone();
@@ -221,6 +231,8 @@ impl App {
             show_strip: true,
             show_inspector: true,
             bin: 0,
+            applied_round: None,
+            wallpaper_light: 0.5,
             show_home: true,
             projects: home::Library::load(),
             home: home::HomeState::default(),
@@ -297,6 +309,41 @@ impl App {
         Color32::from_rgb(r, g, b)
     }
 
+    pub(crate) fn card_alpha(&self) -> u8 {
+        let manual = self.settings.theme.card_opacity;
+        if !self.settings.auto_opacity {
+            return manual;
+        }
+        if self.wallpaper.is_some() {
+            return (178.0 + self.wallpaper_light * 62.0 * (1.0 - self.settings.wallpaper_dim)) as u8;
+        }
+        if self.settings.backdrop != settings::Backdrop::None {
+            return 150;
+        }
+        255
+    }
+
+    pub(crate) fn glass(&self, amount: f32) -> Color32 {
+        let shade = self.shade(amount);
+        Color32::from_rgba_unmultiplied(shade.r(), shade.g(), shade.b(), self.card_alpha())
+    }
+
+    fn restart(&mut self, ctx: &egui::Context) {
+        self.settings.save();
+        if self.path.is_some() && !self.show_home {
+            self.save(false);
+        }
+        if let Ok(executable) = std::env::current_exe() {
+            let mut command = std::process::Command::new(executable);
+            if let Some(path) = self.path.as_ref().filter(|_| !self.show_home) {
+                command.arg(path);
+            }
+            if command.spawn().is_ok() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        }
+    }
+
     fn shade(&self, amount: f32) -> Color32 {
         let [r, g, b] = self.settings.theme.card;
         let [x, y, z] = self.settings.theme.background;
@@ -318,16 +365,18 @@ impl App {
     fn window_buttons(&self, ui: &mut egui::Ui) {
         if cfg!(windows) {
             let context = ui.ctx().clone();
-            if widgets::head(ui, ph::X, "", false).on_hover_text("Close").clicked() {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            if widgets::caption(ui, widgets::Caption::Close).clicked() {
                 context.send_viewport_cmd(egui::ViewportCommand::Close);
             }
             let maximized = ui.input(|input| input.viewport().maximized.unwrap_or(false));
-            if widgets::head(ui, if maximized { ph::COPY } else { ph::SQUARE }, "", false).on_hover_text("Maximize").clicked() {
+            if widgets::caption(ui, if maximized { widgets::Caption::Restore } else { widgets::Caption::Maximize }).clicked() {
                 context.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
             }
-            if widgets::head(ui, ph::MINUS, "", false).on_hover_text("Minimize").clicked() {
+            if widgets::caption(ui, widgets::Caption::Minimize).clicked() {
                 context.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
             }
+            ui.spacing_mut().item_spacing.x = 7.0;
             ui.add_space(10.0);
         }
     }
@@ -388,6 +437,7 @@ impl App {
             let _ = window_vibrancy::clear_tabbed(frame);
             let _ = window_vibrancy::clear_acrylic(frame);
             let _ = window_vibrancy::clear_blur(frame);
+            settings::extend_frame(self.settings.backdrop != Backdrop::None);
             let result = match self.settings.backdrop {
                 Backdrop::None => Ok(()),
                 Backdrop::Mica => window_vibrancy::apply_mica(frame, Some(true)),
@@ -412,11 +462,14 @@ impl App {
         if wanted.is_empty() {
             return;
         }
-        const MAX_SIDE: u32 = 2560;
+        const MAX_SIDE: u32 = MAX_TEXTURE_SIDE;
         match image::open(wanted) {
             Ok(picture) => {
                 let picture = picture.thumbnail(MAX_SIDE, MAX_SIDE).into_rgba8();
                 let size = [picture.width() as usize, picture.height() as usize];
+                let total: u64 = picture.pixels().step_by(97).map(|pixel| pixel[0] as u64 * 2 + pixel[1] as u64 * 5 + pixel[2] as u64).sum();
+                let count = (picture.pixels().len() / 97).max(1) as u64;
+                self.wallpaper_light = (total / count) as f32 / (255.0 * 8.0);
                 let texture = ctx.load_texture("wallpaper", egui::ColorImage::from_rgba_unmultiplied(size, picture.as_raw()), egui::TextureOptions::LINEAR);
                 self.wallpaper = Some((wanted.clone(), texture));
             }
@@ -451,31 +504,43 @@ impl App {
         let theme = &self.settings.theme;
         let color = |[r, g, b]: [u8; 3]| Color32::from_rgb(r, g, b);
         let (card, text, accent) = (color(theme.card), color(theme.text), self.accent());
-        let radius = (theme.radius * 0.6) as u8;
         visuals.override_text_color = Some(text);
         visuals.panel_fill = Color32::TRANSPARENT;
-        visuals.window_fill = card;
+        visuals.window_fill = widgets::mix(card, text, 0.03);
         visuals.faint_bg_color = widgets::mix(card, text, 0.04);
-        visuals.extreme_bg_color = widgets::mix(card, color(theme.background), 0.6);
-        visuals.selection.bg_fill = accent;
-        visuals.selection.stroke = Stroke::new(1.0_f32, accent);
-        visuals.window_corner_radius = theme.radius.into();
-        visuals.menu_corner_radius = radius.into();
-        visuals.window_stroke = Stroke::new(1.0_f32, widgets::mix(card, text, 0.12));
-        for (state, fill) in [(&mut visuals.widgets.noninteractive, card), (&mut visuals.widgets.inactive, widgets::mix(card, text, 0.08)), (&mut visuals.widgets.hovered, widgets::mix(card, accent, 0.4)), (&mut visuals.widgets.active, accent), (&mut visuals.widgets.open, widgets::mix(card, accent, 0.25))] {
-            state.corner_radius = radius.into();
-            state.bg_stroke = Stroke::NONE;
+        visuals.extreme_bg_color = widgets::mix(card, color(theme.background), 0.5);
+        visuals.selection.bg_fill = accent.gamma_multiply(0.7);
+        visuals.selection.stroke = Stroke::new(1.0_f32, Color32::WHITE);
+        visuals.hyperlink_color = accent;
+        visuals.slider_trailing_fill = true;
+        visuals.handle_shape = egui::style::HandleShape::Circle;
+        visuals.window_corner_radius = 8.into();
+        visuals.menu_corner_radius = 6.into();
+        visuals.window_stroke = Stroke::new(1.0_f32, widgets::mix(card, text, 0.14));
+        for (state, fill, border) in [
+            (&mut visuals.widgets.noninteractive, card, 0.08),
+            (&mut visuals.widgets.inactive, widgets::mix(card, text, 0.08), 0.1),
+            (&mut visuals.widgets.hovered, widgets::mix(card, text, 0.13), 0.16),
+            (&mut visuals.widgets.active, widgets::mix(card, text, 0.06), 0.1),
+            (&mut visuals.widgets.open, widgets::mix(card, text, 0.1), 0.12),
+        ] {
+            state.corner_radius = 4.into();
+            state.bg_stroke = Stroke::new(1.0_f32, widgets::mix(card, text, border));
             state.weak_bg_fill = fill;
             state.bg_fill = fill;
             state.expansion = 0.0;
             state.fg_stroke.color = text;
         }
-        visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, widgets::mix(card, text, 0.08));
         ctx.set_visuals(visuals);
         ctx.global_style_mut(|style| {
             style.animation_time = if self.settings.animations { 0.14 } else { 0.0 };
             style.spacing.item_spacing = Vec2::new(7.0, 6.0);
             style.spacing.button_padding = Vec2::new(10.0, 5.0);
+            style.spacing.slider_rail_height = 4.0;
+            style.spacing.interact_size.y = 24.0;
+            style.text_styles.insert(egui::TextStyle::Heading, egui::FontId::proportional(14.0));
+            style.text_styles.insert(egui::TextStyle::Body, egui::FontId::proportional(13.0));
+            style.text_styles.insert(egui::TextStyle::Button, egui::FontId::proportional(13.0));
         });
     }
 
@@ -948,7 +1013,7 @@ impl App {
     }
 
     fn menu(&mut self, root: &mut egui::Ui) {
-        let bar = egui::Frame::new().fill(self.shade(0.5)).inner_margin(egui::Margin::symmetric(8, 3));
+        let bar = egui::Frame::new().fill(self.glass(0.5)).inner_margin(egui::Margin { left: 8, right: 0, top: 0, bottom: 0 });
         egui::Panel::top("menu").show_separator_line(false).frame(bar).show_inside(root, |ui| {
             self.title_drag(ui);
             egui::MenuBar::new().ui(ui, |ui| {
@@ -1132,89 +1197,117 @@ impl App {
     fn windows(&mut self, ctx: &egui::Context) {
         let mut open = self.show_settings;
         let mut changed = false;
-        egui::Window::new("Settings").open(&mut open).resizable(false).collapsible(false).show(ctx, |ui| {
+        let mut relaunch = false;
+        egui::Window::new("Settings").open(&mut open).resizable(false).collapsible(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).default_width(460.0).show(ctx, |ui| {
+            ui.set_width(460.0);
             let accent = self.accent();
-            widgets::heading(ui, ph::PALETTE, "Theme", accent);
-            ui.horizontal_wrapped(|ui| {
-                for theme in settings::Theme::presets().into_iter().chain(settings::Theme::saved()) {
-                    let active = theme.name == self.settings.theme.name;
-                    if widgets::pill(ui, ph::SWATCHES, &theme.name.clone(), active, accent).clicked() {
-                        self.settings.theme = theme;
-                        changed = true;
+            ui.spacing_mut().slider_width = 170.0;
+            egui::ScrollArea::vertical().max_height(ctx.content_rect().height() * 0.72).show(ui, |ui| {
+                widgets::section(ui, "Theme", |ui| {
+                    widgets::setting(ui, "Theme", |ui| {
+                        egui::ComboBox::from_id_salt("theme-pick").width(170.0).selected_text(self.settings.theme.name.clone()).show_ui(ui, |ui| {
+                            for theme in settings::Theme::presets().into_iter().chain(settings::Theme::saved()) {
+                                let active = theme.name == self.settings.theme.name;
+                                if ui.selectable_label(active, &theme.name).clicked() {
+                                    self.settings.theme = theme;
+                                    changed = true;
+                                }
+                            }
+                        });
+                    });
+                    let theme = &mut self.settings.theme;
+                    for (label, value) in [("Background", &mut theme.background), ("Panels", &mut theme.card), ("Text", &mut theme.text)] {
+                        widgets::setting(ui, label, |ui| changed |= ui.color_edit_button_srgb(value).changed());
                     }
-                }
-            });
-            let theme = &mut self.settings.theme;
-            egui::Grid::new("theme").num_columns(2).show(ui, |ui| {
-                for (label, value) in [("Background", &mut theme.background), ("Cards", &mut theme.card), ("Text", &mut theme.text)] {
-                    ui.label(label);
-                    changed |= ui.color_edit_button_srgb(value).changed();
-                    ui.end_row();
-                }
-                ui.label("Accent");
-                changed |= ui.color_edit_button_srgb(&mut self.settings.accent).changed();
-                ui.end_row();
-            });
-            changed |= ui.add(egui::Slider::new(&mut self.settings.theme.card_opacity, 60..=255).text("Card opacity")).changed();
-            changed |= ui.add(egui::Slider::new(&mut self.settings.theme.radius, 0.0..=24.0).text("Roundness")).changed();
-            if self.system_accent.is_some() {
-                changed |= ui.checkbox(&mut self.settings.system_accent, "Use the system accent color").changed();
-            }
-            ui.horizontal(|ui| {
-                ui.add(egui::TextEdit::singleline(&mut self.theme_name).hint_text("Theme name").desired_width(130.0));
-                if ui.button(format!("{}  Save", ph::FLOPPY_DISK)).clicked() && !self.theme_name.trim().is_empty() {
-                    self.settings.theme.name = self.theme_name.trim().to_string();
-                    self.status = if self.settings.theme.store() { "Theme saved".to_string() } else { "Could not save the theme".to_string() };
-                    changed = true;
-                }
-                if ui.button(format!("{}  Import", ph::DOWNLOAD_SIMPLE)).clicked() {
-                    if let Some(theme) = rfd::FileDialog::new().add_filter("Theme", &["json"]).pick_file().and_then(|path| settings::Theme::read(&path)) {
-                        theme.store();
-                        self.settings.theme = theme;
-                        changed = true;
+                    if self.system_accent.is_some() {
+                        widgets::setting(ui, "Use the Windows accent color", |ui| changed |= widgets::toggle(ui, &mut self.settings.system_accent, accent));
                     }
-                }
-                if ui.button(format!("{}  Export", ph::UPLOAD_SIMPLE)).clicked() {
-                    if let Some(path) = rfd::FileDialog::new().add_filter("Theme", &["json"]).set_file_name(format!("{}.json", self.settings.theme.name)).save_file() {
-                        self.settings.theme.write(&path);
+                    if !(self.system_accent.is_some() && self.settings.system_accent) {
+                        widgets::setting(ui, "Accent", |ui| changed |= ui.color_edit_button_srgb(&mut self.settings.accent).changed());
                     }
-                }
-            });
-            if cfg!(windows) {
-                widgets::heading(ui, ph::APP_WINDOW, "Window backdrop", accent);
-                ui.horizontal_wrapped(|ui| {
-                    for (backdrop, label) in settings::Backdrop::ALL {
-                        if widgets::pill(ui, "", label, self.settings.backdrop == backdrop, accent).clicked() {
-                            self.settings.backdrop = backdrop;
+                    widgets::setting(ui, "Panel corners", |ui| changed |= ui.add(egui::Slider::new(&mut self.settings.theme.radius, 0.0..=16.0).show_value(false)).changed());
+                    widgets::setting(ui, "Save as", |ui| {
+                        if ui.button("Save").clicked() && !self.theme_name.trim().is_empty() {
+                            self.settings.theme.name = self.theme_name.trim().to_string();
+                            self.status = if self.settings.theme.store() { "Theme saved".to_string() } else { "Could not save the theme".to_string() };
                             changed = true;
                         }
+                        ui.add(egui::TextEdit::singleline(&mut self.theme_name).hint_text("Theme name").desired_width(170.0));
+                    });
+                    widgets::setting(ui, "Theme file", |ui| {
+                        if ui.button("Export").clicked() {
+                            if let Some(path) = rfd::FileDialog::new().add_filter("Theme", &["json"]).set_file_name(format!("{}.json", self.settings.theme.name)).save_file() {
+                                self.settings.theme.write(&path);
+                            }
+                        }
+                        if ui.button("Import").clicked() {
+                            if let Some(theme) = rfd::FileDialog::new().add_filter("Theme", &["json"]).pick_file().and_then(|path| settings::Theme::read(&path)) {
+                                theme.store();
+                                self.settings.theme = theme;
+                                changed = true;
+                            }
+                        }
+                    });
+                });
+                widgets::section(ui, "Window", |ui| {
+                    if cfg!(windows) {
+                        widgets::setting(ui, "Rounded corners", |ui| changed |= widgets::toggle(ui, &mut self.settings.rounded, accent));
+                        widgets::setting(ui, "Backdrop", |ui| {
+                            let current = settings::Backdrop::ALL.iter().find(|item| item.0 == self.settings.backdrop).map_or("None", |item| item.1);
+                            egui::ComboBox::from_id_salt("backdrop-pick").width(170.0).selected_text(current).show_ui(ui, |ui| {
+                                for (backdrop, label) in settings::Backdrop::ALL {
+                                    if ui.selectable_label(self.settings.backdrop == backdrop, label).clicked() && self.settings.backdrop != backdrop {
+                                        relaunch = (self.settings.backdrop == settings::Backdrop::None) != (backdrop == settings::Backdrop::None);
+                                        self.settings.backdrop = backdrop;
+                                        changed = true;
+                                    }
+                                }
+                            });
+                        });
+                        ui.label(RichText::new("Turning a backdrop on or off restarts the app and uses more memory").small().weak());
+                    }
+                    widgets::setting(ui, "Wallpaper", |ui| {
+                        if !self.settings.wallpaper.is_empty() && ui.button("Remove").clicked() {
+                            self.settings.wallpaper.clear();
+                            changed = true;
+                        }
+                        if ui.button("Choose image").clicked() {
+                            if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "webp", "bmp"]).pick_file() {
+                                self.settings.wallpaper = path.to_string_lossy().into_owned();
+                                changed = true;
+                            }
+                        }
+                    });
+                    if !self.settings.wallpaper.is_empty() {
+                        widgets::setting(ui, "Wallpaper dim", |ui| changed |= ui.add(egui::Slider::new(&mut self.settings.wallpaper_dim, 0.0..=0.9).show_value(false)).changed());
+                    }
+                    widgets::setting(ui, "Automatic panel opacity", |ui| changed |= widgets::toggle(ui, &mut self.settings.auto_opacity, accent));
+                    if !self.settings.auto_opacity {
+                        widgets::setting(ui, "Panel opacity", |ui| changed |= ui.add(egui::Slider::new(&mut self.settings.theme.card_opacity, 60..=255).show_value(false)).changed());
                     }
                 });
-            }
-            widgets::heading(ui, ph::IMAGE, "Wallpaper", accent);
-            ui.horizontal(|ui| {
-                if ui.button(format!("{}  Choose image", ph::FOLDER_OPEN)).clicked() {
-                    if let Some(path) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "webp", "bmp"]).pick_file() {
-                        self.settings.wallpaper = path.to_string_lossy().into_owned();
+                widgets::section(ui, "General", |ui| {
+                    widgets::setting(ui, "Animations", |ui| changed |= widgets::toggle(ui, &mut self.settings.animations, accent));
+                    widgets::setting(ui, "Snap clips while dragging", |ui| changed |= widgets::toggle(ui, &mut self.settings.snapping, accent));
+                    widgets::setting(ui, "Interface size", |ui| {
+                        let response = ui.add(egui::Slider::new(&mut self.settings.ui_scale, 0.6..=2.0).show_value(false));
+                        changed |= response.drag_stopped() || (response.changed() && !response.dragged());
+                    });
+                    widgets::setting(ui, "Preview quality", |ui| changed |= ui.add(egui::Slider::new(&mut self.settings.preview_quality, 0.25..=1.0).show_value(false)).changed());
+                });
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Reset everything").clicked() {
+                        relaunch = self.settings.backdrop != settings::Backdrop::None;
+                        self.settings = Settings::default();
                         changed = true;
                     }
-                }
-                if !self.settings.wallpaper.is_empty() && ui.button(format!("{}  Remove", ph::X)).clicked() {
-                    self.settings.wallpaper.clear();
-                    changed = true;
-                }
+                });
             });
-            changed |= ui.add(egui::Slider::new(&mut self.settings.wallpaper_dim, 0.0..=0.9).text("Dim")).changed();
-            widgets::heading(ui, ph::SLIDERS, "General", accent);
-            changed |= ui.checkbox(&mut self.settings.animations, "Animations").changed();
-            changed |= ui.add(egui::Slider::new(&mut self.settings.ui_scale, 0.6..=2.0).text("Interface size")).changed();
-            changed |= ui.add(egui::Slider::new(&mut self.settings.preview_quality, 0.25..=1.0).text("Preview quality")).changed();
-            changed |= ui.checkbox(&mut self.settings.snapping, "Snap clips while dragging").changed();
-            if ui.button("Reset").clicked() {
-                self.settings = Settings::default();
-                changed = true;
-            }
         });
+        if relaunch {
+            self.restart(ctx);
+        }
         self.show_settings = open;
         if changed {
             self.settings.save();
@@ -2086,13 +2179,14 @@ impl App {
     }
 
     fn monitor(&mut self, ui: &mut egui::Ui) {
-                let controls = 78.0;
+                let controls = 70.0;
         let fps = self.project.fps;
         let area = Vec2::new(ui.available_width(), (ui.available_height() - controls).max(40.0));
         let aspect = self.project.width as f32 / self.project.height as f32;
         let size = if area.x / area.y > aspect { Vec2::new(area.y * aspect, area.y) } else { Vec2::new(area.x, area.x / aspect) };
         let pixels = ui.ctx().pixels_per_point();
-        let scale = (size.x * pixels / self.project.width as f32 * self.settings.preview_quality).clamp(0.05, 1.0);
+        let largest = self.project.width.max(self.project.height).max(1) as f32;
+        let scale = (size.x * pixels / self.project.width as f32 * self.settings.preview_quality).clamp(0.05, 1.0).min(MAX_TEXTURE_SIDE as f32 / largest);
         let time = self.frame;
         let mut found = Vec::new();
         self.project.wanted_media(time, 0, &mut found);
@@ -2141,35 +2235,32 @@ impl App {
         let accent = self.accent();
         let end = self.project.end_frame().max(1);
         let mut position = self.frame as f32;
-        if widgets::scrubber(ui, &mut position, end as f32, accent) {
-            self.frame = (position as u32).min(self.project.duration - 1);
-        }
+        ui.vertical_centered(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            ui.horizontal(|ui| {
+                ui.add_space((ui.available_width() - 142.0).max(0.0) / 2.0);
+                if widgets::transport(ui, widgets::Glyph::Back, 20.0).on_hover_text("Previous edit (Up)").clicked() {
+                    self.jump_edit(false);
+                }
+                if widgets::transport(ui, if self.playing { widgets::Glyph::Pause } else { widgets::Glyph::Play }, 24.0).on_hover_text("Play or pause (Space)").clicked() {
+                    self.playing = !self.playing;
+                }
+                if widgets::transport(ui, widgets::Glyph::Forward, 20.0).on_hover_text("Next edit (Down)").clicked() {
+                    self.jump_edit(true);
+                }
+            });
+        });
         ui.horizontal(|ui| {
-            let width = ui.available_width();
-            ui.allocate_ui_with_layout(Vec2::new(120.0, 44.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                ui.label(RichText::new(timecode(self.frame, fps)).monospace().size(15.0).color(accent));
+            let text = |frame: u32| RichText::new(timecode(frame, fps)).monospace().size(12.0);
+            ui.label(text(self.frame));
+            let remaining = ui.available_width() - 92.0;
+            ui.allocate_ui(Vec2::new(remaining.max(40.0), 18.0), |ui| {
+                ui.set_width(remaining.max(40.0));
+                if widgets::scrubber(ui, &mut position, end as f32, accent) {
+                    self.frame = (position as u32).min(self.project.duration - 1);
+                }
             });
-            const CONTROLS_WIDTH: f32 = 34.0 * 4.0 + 44.0 + 7.0 * 4.0;
-            ui.add_space(((width - CONTROLS_WIDTH) / 2.0 - 127.0).max(0.0));
-            ui.spacing_mut().item_spacing.x = 7.0;
-            if widgets::transport(ui, ph::SKIP_BACK, false, accent).on_hover_text("Previous edit (Up)").clicked() {
-                self.jump_edit(false);
-            }
-            if widgets::transport(ui, ph::CARET_LEFT, false, accent).on_hover_text("Back one frame (Left)").clicked() {
-                self.frame = self.frame.saturating_sub(1);
-            }
-            if widgets::transport(ui, if self.playing { ph::PAUSE } else { ph::PLAY }, true, accent).on_hover_text("Space").clicked() {
-                self.playing = !self.playing;
-            }
-            if widgets::transport(ui, ph::CARET_RIGHT, false, accent).on_hover_text("Forward one frame (Right)").clicked() {
-                self.frame = (self.frame + 1).min(self.project.duration - 1);
-            }
-            if widgets::transport(ui, ph::SKIP_FORWARD, false, accent).on_hover_text("Next edit (Down)").clicked() {
-                self.jump_edit(true);
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(RichText::new(timecode(end, fps)).monospace().size(15.0).weak());
-            });
+            ui.label(text(end).weak());
         });
     }
 
@@ -2372,7 +2463,7 @@ impl App {
     fn timeline(&mut self, ui: &mut egui::Ui) {
         let (response, painter) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
         let rect = response.rect;
-        painter.rect_filled(rect, 0.0_f32, self.shade(0.7));
+        painter.rect_filled(rect, 0.0_f32, self.glass(0.7));
         painter.text(rect.min + Vec2::new(HEADER_WIDTH / 2.0, RULER_HEIGHT / 2.0), egui::Align2::CENTER_CENTER, timecode(self.frame, self.project.fps), egui::FontId::proportional(24.0), Color32::WHITE);
         let accent = self.accent();
         let zoom = self.zoom;
@@ -2423,7 +2514,7 @@ impl App {
             let line = row_rect(row);
             let data = &self.project.tracks[*track];
             let header = Rect::from_min_size(line.min, Vec2::new(HEADER_WIDTH - 2.0, line.height()));
-            painter.rect_filled(header, 0.0_f32, self.shade(0.0));
+            painter.rect_filled(header, 0.0_f32, self.glass(0.0));
             painter.line_segment([line.left_bottom(), line.right_bottom()], Stroke::new(1.0_f32, self.shade(1.0)));
             let number = order[row..].iter().filter(|other| self.project.tracks[**other].kind == data.kind).count();
             let code = format!("{}{number}", if data.kind == TrackKind::Video { "V" } else { "A" });
@@ -2712,6 +2803,10 @@ impl eframe::App for App {
 impl App {
     pub fn show(&mut self, root: &mut egui::Ui) {
         let ctx = &root.ctx().clone();
+        if self.applied_round != Some(self.settings.rounded) {
+            self.applied_round = Some(self.settings.rounded);
+            settings::set_rounded(self.settings.rounded);
+        }
         self.release_idle_memory(ctx);
         self.sync_wallpaper(ctx);
         self.paint_background(ctx);
@@ -2733,8 +2828,8 @@ impl App {
         let theme = &self.settings.theme;
         let [r, g, b] = theme.card;
         let border = Stroke::new(1.0_f32, Color32::from_gray(12));
-        let card = egui::Frame::new().fill(Color32::from_rgba_unmultiplied(r, g, b, theme.card_opacity)).corner_radius(theme.radius).stroke(border).inner_margin(6);
-        let status = egui::Frame::new().fill(self.shade(0.5)).inner_margin(egui::Margin::symmetric(10, 2));
+        let card = egui::Frame::new().fill(Color32::from_rgba_unmultiplied(r, g, b, self.card_alpha())).corner_radius(theme.radius).stroke(border).inner_margin(6);
+        let status = egui::Frame::new().fill(self.glass(0.5)).inner_margin(egui::Margin::symmetric(10, 2));
         egui::Panel::bottom("pages").show_separator_line(false).frame(status).show_inside(root, |ui| {
             ui.horizontal(|ui| {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

@@ -84,6 +84,8 @@ pub struct Settings {
     pub wallpaper: String,
     pub wallpaper_dim: f32,
     pub animations: bool,
+    pub rounded: bool,
+    pub auto_opacity: bool,
     pub home: crate::home::HomeSettings,
     pub ui_scale: f32,
     pub preview_quality: f32,
@@ -96,7 +98,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { accent: [150, 100, 235], theme: Theme::default(), backdrop: Backdrop::None, wallpaper: String::new(), wallpaper_dim: 0.45, animations: true, home: Default::default(), ui_scale: 1.0, preview_quality: 1.0, snapping: true, gpu_preview: false, system_accent: false, caption_language: "auto".into(), keys: Default::default() }
+        Self { accent: [150, 100, 235], theme: Theme::default(), backdrop: Backdrop::None, wallpaper: String::new(), wallpaper_dim: 0.45, animations: true, rounded: true, auto_opacity: true, home: Default::default(), ui_scale: 1.0, preview_quality: 1.0, snapping: true, gpu_preview: false, system_accent: false, caption_language: "auto".into(), keys: Default::default() }
     }
 }
 
@@ -128,6 +130,72 @@ pub fn trim_memory() {
 
 #[cfg(not(windows))]
 pub fn trim_memory() {}
+
+#[cfg(windows)]
+pub fn set_rounded(rounded: bool) {
+    const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
+    let preference: i32 = if rounded { 2 } else { 1 };
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn EnumThreadWindows(thread: u32, callback: unsafe extern "system" fn(*mut core::ffi::c_void, isize) -> i32, data: isize) -> i32;
+        fn IsWindowVisible(window: *mut core::ffi::c_void) -> i32;
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetCurrentThreadId() -> u32;
+    }
+    #[link(name = "dwmapi")]
+    unsafe extern "system" {
+        fn DwmSetWindowAttribute(window: *mut core::ffi::c_void, attribute: u32, value: *const core::ffi::c_void, size: u32) -> i32;
+    }
+    unsafe extern "system" fn apply(window: *mut core::ffi::c_void, data: isize) -> i32 {
+        unsafe {
+            if IsWindowVisible(window) != 0 {
+                let preference = data as i32;
+                DwmSetWindowAttribute(window, DWMWA_WINDOW_CORNER_PREFERENCE, (&raw const preference).cast(), 4);
+            }
+        }
+        1
+    }
+    unsafe {
+        EnumThreadWindows(GetCurrentThreadId(), apply, preference as isize);
+    }
+}
+
+#[cfg(not(windows))]
+pub fn set_rounded(_rounded: bool) {}
+
+#[cfg(windows)]
+pub fn extend_frame(extended: bool) {
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn EnumThreadWindows(thread: u32, callback: unsafe extern "system" fn(*mut core::ffi::c_void, isize) -> i32, data: isize) -> i32;
+        fn IsWindowVisible(window: *mut core::ffi::c_void) -> i32;
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetCurrentThreadId() -> u32;
+    }
+    #[link(name = "dwmapi")]
+    unsafe extern "system" {
+        fn DwmExtendFrameIntoClientArea(window: *mut core::ffi::c_void, margins: *const [i32; 4]) -> i32;
+    }
+    unsafe extern "system" fn apply(window: *mut core::ffi::c_void, data: isize) -> i32 {
+        let margins = [data as i32; 4];
+        unsafe {
+            if IsWindowVisible(window) != 0 {
+                DwmExtendFrameIntoClientArea(window, &raw const margins);
+            }
+        }
+        1
+    }
+    unsafe {
+        EnumThreadWindows(GetCurrentThreadId(), apply, if extended { -1 } else { 0 });
+    }
+}
+
+#[cfg(not(windows))]
+pub fn extend_frame(_extended: bool) {}
 
 #[cfg(windows)]
 pub fn drag_window(area: usize) {

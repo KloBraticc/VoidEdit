@@ -57,17 +57,151 @@ pub fn stacked(ui: &mut egui::Ui, icon: &str, label: &str, active: bool, accent:
     response
 }
 
-pub fn transport(ui: &mut egui::Ui, icon: &str, primary: bool, accent: Color32) -> Response {
-    let (rect, response) = ui.allocate_exact_size(Vec2::splat(if primary { 44.0 } else { 34.0 }), Sense::click());
+#[derive(Clone, Copy, PartialEq)]
+pub enum Glyph {
+    Play,
+    Pause,
+    Back,
+    Forward,
+}
+
+fn triangle(painter: &egui::Painter, tip: egui::Pos2, base: f32, half: f32, color: Color32) {
+    painter.add(egui::Shape::convex_polygon(vec![tip, egui::pos2(base, tip.y + half), egui::pos2(base, tip.y - half)], color, egui::Stroke::NONE));
+}
+
+pub fn transport(ui: &mut egui::Ui, glyph: Glyph, size: f32) -> Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(size + 12.0, size + 8.0), Sense::click());
     let (hover, press) = motion(ui, &response);
-    let radius = rect.width() / 2.0 - press;
-    if primary {
-        ui.painter().circle_filled(rect.center(), radius, mix(accent, Color32::WHITE, hover * 0.12));
-    } else {
-        ui.painter().circle_filled(rect.center(), radius, Color32::WHITE.gamma_multiply(0.08 * hover));
+    let color = mix(Color32::from_gray(225), Color32::WHITE, hover);
+    let center = rect.center();
+    let half = size / 2.0 - press;
+    let painter = ui.painter();
+    match glyph {
+        Glyph::Play => {
+            let mut points = vec![egui::pos2(center.x - half * 0.75, center.y - half), egui::pos2(center.x + half, center.y), egui::pos2(center.x - half * 0.75, center.y + half)];
+            points.reverse();
+            painter.add(egui::Shape::convex_polygon(points, color, egui::Stroke::NONE));
+        }
+        Glyph::Pause => {
+            for side in [-1.0, 1.0] {
+                let bar = egui::Rect::from_center_size(center + Vec2::new(side * half * 0.5, 0.0), Vec2::new(half * 0.55, half * 2.0));
+                painter.rect_filled(bar, 1.0_f32, color);
+            }
+        }
+        Glyph::Back => {
+            triangle(painter, egui::pos2(center.x - half, center.y), center.x, half * 0.72, color);
+            triangle(painter, egui::pos2(center.x, center.y), center.x + half, half * 0.72, color);
+        }
+        Glyph::Forward => {
+            triangle(painter, egui::pos2(center.x + half, center.y), center.x, half * 0.72, color);
+            triangle(painter, egui::pos2(center.x, center.y), center.x - half, half * 0.72, color);
+        }
     }
-    let color = if primary { Color32::WHITE } else { mix(IDLE, Color32::WHITE, hover) };
-    paint_icon(ui.painter(), rect.center(), if primary { 22.0 } else { 19.0 }, icon, color);
+    response
+}
+
+#[derive(Clone, Copy)]
+pub enum Caption {
+    Minimize,
+    Maximize,
+    Restore,
+    Close,
+}
+
+pub fn caption(ui: &mut egui::Ui, kind: Caption) -> Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(46.0, 32.0), Sense::click());
+    let hovered = response.hovered();
+    let pressed = response.is_pointer_button_down_on();
+    let text = ui.visuals().text_color();
+    let fill = match (kind, hovered, pressed) {
+        (Caption::Close, true, false) => Color32::from_rgb(196, 43, 28),
+        (Caption::Close, true, true) => Color32::from_rgb(200, 70, 58),
+        (_, true, false) => text.gamma_multiply(0.09),
+        (_, true, true) => text.gamma_multiply(0.05),
+        _ => Color32::TRANSPARENT,
+    };
+    ui.painter().rect_filled(rect, 0.0_f32, fill);
+    let color = if matches!(kind, Caption::Close) && hovered { Color32::WHITE } else { text };
+    let stroke = egui::Stroke::new(1.0_f32, color);
+    let center = rect.center();
+    let half = 5.0;
+    let box_at = |offset: Vec2| egui::Rect::from_center_size(center + offset, Vec2::splat(half * 2.0));
+    let painter = ui.painter();
+    match kind {
+        Caption::Minimize => {
+            painter.line_segment([center - Vec2::new(half, 0.0), center + Vec2::new(half, 0.0)], stroke);
+        }
+        Caption::Maximize => {
+            painter.rect_stroke(box_at(Vec2::ZERO), 1.5_f32, stroke, egui::StrokeKind::Middle);
+        }
+        Caption::Restore => {
+            let back = box_at(Vec2::new(1.5, -1.5)).shrink(1.0);
+            painter.line_segment([back.left_top(), back.right_top()], stroke);
+            painter.line_segment([back.right_top(), back.right_bottom()], stroke);
+            painter.rect_stroke(box_at(Vec2::new(-1.0, 1.0)).shrink(1.0), 1.5_f32, stroke, egui::StrokeKind::Middle);
+        }
+        Caption::Close => {
+            painter.line_segment([center - Vec2::splat(half), center + Vec2::splat(half)], stroke);
+            painter.line_segment([center + Vec2::new(-half, half), center + Vec2::new(half, -half)], stroke);
+        }
+    }
+    response
+}
+
+pub fn toggle(ui: &mut egui::Ui, value: &mut bool, accent: Color32) -> bool {
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(40.0, 20.0), Sense::click());
+    if response.clicked() {
+        *value = !*value;
+    }
+    let on = ui.ctx().animate_bool_with_time(response.id.with("on"), *value, 0.12);
+    let text = ui.visuals().text_color();
+    ui.painter().rect_filled(rect, 10.0_f32, mix(Color32::from_gray(60), accent, on));
+    if on < 0.5 {
+        ui.painter().rect_stroke(rect, 10.0_f32, egui::Stroke::new(1.0_f32, Color32::from_gray(130)), egui::StrokeKind::Inside);
+    }
+    let x = rect.left() + 10.0 + on * 20.0;
+    ui.painter().circle_filled(egui::pos2(x, rect.center().y), 6.0, mix(text, Color32::WHITE, on));
+    response.clicked()
+}
+
+pub fn setting(ui: &mut egui::Ui, label: &str, add: impl FnOnce(&mut egui::Ui)) {
+    ui.horizontal(|ui| {
+        ui.set_min_height(30.0);
+        ui.label(label);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), add);
+    });
+}
+
+pub fn section(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) {
+    ui.add_space(8.0);
+    ui.label(RichText::new(title).strong());
+    ui.add_space(3.0);
+    egui::Frame::new().fill(Color32::WHITE.gamma_multiply(0.035)).stroke(egui::Stroke::new(1.0_f32, Color32::WHITE.gamma_multiply(0.06))).corner_radius(6).inner_margin(egui::Margin::symmetric(12, 6)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        add(ui);
+    });
+}
+
+pub fn accent_button(ui: &mut egui::Ui, label: &str, accent: Color32) -> Response {
+    ui.add(egui::Button::new(RichText::new(label).color(Color32::WHITE)).fill(accent).min_size(Vec2::new(86.0, 30.0)))
+}
+
+pub fn plain_button(ui: &mut egui::Ui, label: &str) -> Response {
+    ui.add(egui::Button::new(label).min_size(Vec2::new(86.0, 30.0)))
+}
+
+pub fn format_card(ui: &mut egui::Ui, name: &str, width: u32, height: u32, active: bool, accent: Color32) -> Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(98.0, 88.0), Sense::click());
+    let (hover, _) = motion(ui, &response);
+    let text = ui.visuals().text_color();
+    ui.painter().rect_filled(rect, 6.0_f32, Color32::WHITE.gamma_multiply(0.035 + hover * 0.05));
+    let border = if active { egui::Stroke::new(2.0_f32, accent) } else { egui::Stroke::new(1.0_f32, Color32::WHITE.gamma_multiply(0.07)) };
+    ui.painter().rect_stroke(rect, 6.0_f32, border, egui::StrokeKind::Inside);
+    let scale = 34.0 / width.max(height).max(1) as f32;
+    let shape = egui::Rect::from_center_size(rect.center_top() + Vec2::new(0.0, 28.0), Vec2::new(width as f32 * scale, height as f32 * scale));
+    ui.painter().rect_stroke(shape, 2.0_f32, egui::Stroke::new(1.5_f32, if active { accent } else { Color32::GRAY }), egui::StrokeKind::Middle);
+    ui.painter().text(rect.center_bottom() - Vec2::new(0.0, 25.0), egui::Align2::CENTER_CENTER, name, egui::FontId::proportional(12.0), text);
+    ui.painter().text(rect.center_bottom() - Vec2::new(0.0, 11.0), egui::Align2::CENTER_CENTER, format!("{width} x {height}"), egui::FontId::proportional(10.0), Color32::GRAY);
     response
 }
 
@@ -101,8 +235,3 @@ pub fn primary_card(ui: &mut egui::Ui, icon: &str, title: &str, detail: &str, ac
     response
 }
 
-pub fn heading(ui: &mut egui::Ui, icon: &str, label: &str, accent: Color32) {
-    ui.add_space(6.0);
-    ui.label(RichText::new(format!("{icon}  {label}")).strong().color(accent));
-    ui.add_space(2.0);
-}

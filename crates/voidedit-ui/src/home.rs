@@ -11,7 +11,7 @@ use crate::settings::Settings;
 use crate::{widgets, App};
 
 const LABELS: [[u8; 3]; 7] = [[230, 80, 90], [240, 150, 60], [235, 205, 70], [80, 195, 120], [70, 170, 240], [150, 100, 235], [235, 110, 190]];
-const PRESETS: [(&str, u32, u32); 8] = [("Widescreen 1080p", 1920, 1080), ("Widescreen 1440p", 2560, 1440), ("Widescreen 4K", 3840, 2160), ("Vertical", 1080, 1920), ("Square", 1080, 1080), ("Portrait 4:5", 1080, 1350), ("Ultrawide", 2560, 1080), ("Cinema 4K", 4096, 2160)];
+const PRESETS: [(&str, u32, u32); 8] = [("1080p", 1920, 1080), ("1440p", 2560, 1440), ("4K", 3840, 2160), ("Vertical", 1080, 1920), ("Square", 1080, 1080), ("Portrait 4:5", 1080, 1350), ("Ultrawide", 2560, 1080), ("Cinema 4K", 4096, 2160)];
 const SORTS: [(&str, Sort); 6] = [("Last opened", Sort::Opened), ("Date created", Sort::Created), ("Name", Sort::Name), ("Length", Sort::Length), ("Clips", Sort::Clips), ("File size", Sort::Size)];
 const THUMB_WIDTH: usize = 320;
 const SCAN_DEPTH: u32 = 6;
@@ -359,8 +359,8 @@ impl App {
         let accent = self.accent();
         let theme = self.settings.theme.clone();
         let [r, g, b] = theme.card;
-        let card = egui::Frame::new().fill(Color32::from_rgba_unmultiplied(r, g, b, theme.card_opacity)).corner_radius(theme.radius).stroke(egui::Stroke::new(1.0_f32, Color32::from_gray(12))).inner_margin(10);
-        let bar = egui::Frame::new().fill(self.shade(0.5)).inner_margin(egui::Margin::symmetric(10, 3));
+        let card = egui::Frame::new().fill(Color32::from_rgba_unmultiplied(r, g, b, self.card_alpha())).corner_radius(theme.radius).stroke(egui::Stroke::new(1.0_f32, Color32::from_gray(12))).inner_margin(10);
+        let bar = egui::Frame::new().fill(self.glass(0.5)).inner_margin(egui::Margin { left: 10, right: 0, top: 0, bottom: 0 });
         egui::Panel::top("home-bar").show_separator_line(false).frame(bar).show_inside(root, |ui| {
             self.title_drag(ui);
             ui.horizontal(|ui| {
@@ -600,7 +600,7 @@ impl App {
         let hover = ctx.animate_bool_with_time(response.id.with("hover"), response.hovered(), 0.14);
         let painter = ui.painter_at(rect.expand(3.0));
         let missing = !Path::new(&entry.path).exists();
-        painter.rect_filled(rect, 6.0_f32, widgets::mix(self.shade(0.5), accent, hover * 0.16));
+        painter.rect_filled(rect, 6.0_f32, widgets::mix(self.shade(0.3), accent, hover * 0.16));
         let image = Rect::from_min_size(rect.min, Vec2::new(width, picture));
         painter.rect_filled(image, 6.0_f32, Color32::from_gray(12));
         if let Some(texture) = self.thumb(ctx, &entry.path) {
@@ -796,42 +796,59 @@ impl App {
         if let Some(mut draft) = self.home.draft.take() {
             let mut open = true;
             let mut create = false;
-            egui::Window::new("New project").open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
-                ui.add(egui::TextEdit::singleline(&mut draft.name).hint_text("Project name").desired_width(280.0));
-                ui.add_space(6.0);
+            let mut cancel = false;
+            egui::Window::new("New project").open(&mut open).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
+                ui.set_width(428.0);
+                widgets::setting(ui, "Name", |ui| {
+                    ui.add(egui::TextEdit::singleline(&mut draft.name).desired_width(320.0));
+                });
+                ui.add_space(8.0);
+                ui.label("Format");
+                ui.add_space(2.0);
                 ui.horizontal_wrapped(|ui| {
-                    ui.set_max_width(320.0);
+                    ui.spacing_mut().item_spacing = Vec2::splat(8.0);
                     for (label, width, height) in PRESETS {
-                        if widgets::pill(ui, "", label, draft.width == width && draft.height == height, accent).clicked() {
+                        if widgets::format_card(ui, label, width, height, draft.width == width && draft.height == height, accent).clicked() {
                             draft.width = width;
                             draft.height = height;
                         }
                     }
                 });
-                ui.horizontal(|ui| {
-                    ui.add(egui::DragValue::new(&mut draft.width).range(16..=8192).suffix(" w"));
-                    ui.add(egui::DragValue::new(&mut draft.height).range(16..=8192).suffix(" h"));
-                    egui::ComboBox::from_id_salt("draft-fps").selected_text(format!("{} fps", draft.fps)).show_ui(ui, |ui| {
+                ui.add_space(8.0);
+                widgets::setting(ui, "Size", |ui| {
+                    ui.add(egui::DragValue::new(&mut draft.height).range(16..=8192).suffix(" px"));
+                    ui.label("x");
+                    ui.add(egui::DragValue::new(&mut draft.width).range(16..=8192).suffix(" px"));
+                });
+                widgets::setting(ui, "Frame rate", |ui| {
+                    egui::ComboBox::from_id_salt("draft-fps").width(110.0).selected_text(format!("{} fps", draft.fps)).show_ui(ui, |ui| {
                         for fps in [24, 25, 30, 48, 50, 60, 120] {
                             ui.selectable_value(&mut draft.fps, fps, format!("{fps} fps"));
                         }
                     });
                 });
                 if !self.projects.collections.is_empty() {
-                    let shown = if draft.collection.is_empty() { "No collection".to_string() } else { draft.collection.clone() };
-                    egui::ComboBox::from_id_salt("draft-collection").selected_text(shown).show_ui(ui, |ui| {
-                        ui.selectable_value(&mut draft.collection, String::new(), "No collection");
-                        for name in &self.projects.collections {
-                            ui.selectable_value(&mut draft.collection, name.clone(), name);
-                        }
+                    widgets::setting(ui, "Collection", |ui| {
+                        let shown = if draft.collection.is_empty() { "None".to_string() } else { draft.collection.clone() };
+                        egui::ComboBox::from_id_salt("draft-collection").width(110.0).selected_text(shown).show_ui(ui, |ui| {
+                            ui.selectable_value(&mut draft.collection, String::new(), "None");
+                            for name in &self.projects.collections {
+                                ui.selectable_value(&mut draft.collection, name.clone(), name);
+                            }
+                        });
                     });
                 }
-                ui.add_space(6.0);
-                create = widgets::pill(ui, ph::PLUS, "Create", true, accent).clicked();
+                ui.add_space(10.0);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    create = widgets::accent_button(ui, "Create", accent).clicked();
+                    if widgets::plain_button(ui, "Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
             });
             if create {
                 self.create_project(&draft);
-            } else if open {
+            } else if open && !cancel {
                 self.home.draft = Some(draft);
             }
         }
