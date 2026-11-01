@@ -1,0 +1,12 @@
+[package]
+name = "voidedit-media"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+voidedit-render.workspace = true
+cpal = "0.15"
+filmcraft-media = { git = "https://github.com/storytold/filmcraft", rev = "5ed4952" }
+filmcraft-codecs = { git = "https://github.com/storytold/filmcraft", rev = "5ed4952" }
+filmcraft-time = { git = "https://github.com/storytold/filmcraft", rev = "5ed4952" }

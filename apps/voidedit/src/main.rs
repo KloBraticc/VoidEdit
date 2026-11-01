@@ -32,7 +32,7 @@ fn main() -> eframe::Result {
         options,
         Box::new(move |context| {
             voidedit_ui::style(&context.egui_ctx);
-            Ok(Box::new(voidedit_ui::App::new(status)))
+            Ok(Box::new(voidedit_ui::App::new(&context.egui_ctx, status)))
         }),
     )
 }

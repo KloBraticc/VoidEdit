@@ -7,5 +7,6 @@ license.workspace = true
 [dependencies]
 voidedit-core.workspace = true
 voidedit-render.workspace = true
+voidedit-media.workspace = true
 eframe.workspace = true
 rfd.workspace = true

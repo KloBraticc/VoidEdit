@@ -105,6 +105,8 @@ pub struct Clip {
     pub name: String,
     pub track: usize,
     pub media: Option<String>,
+    #[serde(default)]
+    pub offset: u32,
     pub shape: Shape,
     pub color: [u8; 3],
     pub start: u32,
@@ -180,6 +182,7 @@ impl Project {
             name: format!("{name} {index}"),
             track: self.track_of(TrackKind::Video),
             media: None,
+            offset: 0,
             shape,
             color,
             start,
@@ -196,8 +199,18 @@ impl Project {
         }
     }
 
-    pub fn new_media_clip(&self, path: &str, start: u32) -> Clip {
+    pub fn new_media_clip(&self, path: &str, start: u32, size: Option<(u32, u32)>, seconds: f64) -> Clip {
         let mut clip = self.new_clip(Shape::Solid, start);
+        match size {
+            Some((width, height)) => {
+                clip.width = width as f32;
+                clip.height = height as f32;
+                let fit = (self.width as f32 / clip.width.max(1.0)).min(self.height as f32 / clip.height.max(1.0));
+                clip.scale = Param::new(fit * 100.0);
+            }
+            None => clip.track = self.track_of(TrackKind::Audio),
+        }
+        clip.end = start + ((seconds * self.fps as f64).ceil() as u32).max(1);
         clip.name = std::path::Path::new(path).file_name().map_or(path.to_string(), |name| name.to_string_lossy().into_owned());
         clip.media = Some(path.to_string());
         clip
@@ -210,6 +223,7 @@ impl Project {
         }
         let mut right = clip.clone();
         clip.end = frame;
+        right.offset += frame - right.start;
         right.start = frame;
         self.clips.push(right);
     }

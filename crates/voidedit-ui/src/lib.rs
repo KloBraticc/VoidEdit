@@ -3,6 +3,7 @@ use std::time::Instant;
 
 use eframe::egui::{self, Color32, Pos2, Rect, Sense, Stroke, Vec2};
 use voidedit_core::{timecode, Effect, History, Param, Project, Shape, TrackKind};
+use voidedit_media::{Audio, AudioClip, FrameWant, Frames, Library};
 use voidedit_render::{render, Frame};
 
 const HEADER_WIDTH: f32 = 110.0;
@@ -40,13 +41,23 @@ pub struct App {
     search: String,
     preview: Frame,
     texture: Option<egui::TextureHandle>,
-    rendered: Option<(u32, Project, f32)>,
+    rendered: Option<(u32, Project, f32, u64)>,
+    library: Library,
+    frames: Frames,
+    audio: Audio,
+    audio_playing: bool,
+    audio_project: Option<Project>,
+    meter: f32,
     status: String,
     update_status: std::sync::Arc<std::sync::Mutex<String>>,
 }
 
 impl App {
-    pub fn new(update_status: std::sync::Arc<std::sync::Mutex<String>>) -> Self {
+    pub fn new(ctx: &egui::Context, update_status: std::sync::Arc<std::sync::Mutex<String>>) -> Self {
+        let library = Library::default();
+        let repaint = ctx.clone();
+        let frames = Frames::new(library.clone(), Box::new(move || repaint.request_repaint()));
+        let audio = Audio::new(library.clone());
         let project = Project::default();
         Self {
             committed: project.clone(),
@@ -66,6 +77,12 @@ impl App {
             preview: Frame::default(),
             texture: None,
             rendered: None,
+            library,
+            frames,
+            audio,
+            audio_playing: false,
+            audio_project: None,
+            meter: 0.0,
             status: String::new(),
             update_status,
         }
@@ -204,6 +221,41 @@ impl App {
         ctx.request_repaint();
     }
 
+    fn sync_audio(&mut self, ctx: &egui::Context) {
+        if self.audio_project.as_ref() != Some(&self.project) {
+            let fps = self.project.fps as f64;
+            let clips = self
+                .project
+                .clips
+                .iter()
+                .filter_map(|clip| {
+                    Some(AudioClip {
+                        path: clip.media.clone()?,
+                        start: clip.start as f64 / fps,
+                        end: clip.end as f64 / fps,
+                        offset: clip.offset as f64 / fps,
+                        gain: 1.0,
+                    })
+                })
+                .collect();
+            self.audio.set_clips(clips);
+            self.audio_project = Some(self.project.clone());
+        }
+        if self.playing != self.audio_playing {
+            self.audio_playing = self.playing;
+            if self.playing {
+                self.audio.play(self.frame as f64 / self.project.fps as f64);
+            } else {
+                self.audio.stop();
+            }
+        }
+        let peak = self.audio.peak();
+        self.meter = peak.max(self.meter * 0.9).clamp(0.0, 1.0);
+        if self.meter > 0.005 {
+            ctx.request_repaint();
+        }
+    }
+
     fn menu(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("menu").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
@@ -295,9 +347,16 @@ impl App {
             }
         });
         if let Some(file) = add {
-            let clip = self.project.new_media_clip(&file, self.frame);
-            self.project.clips.push(clip);
-            self.selected = Some(self.project.clips.len() - 1);
+            match self.library.details(&file) {
+                Some(details) => {
+                    let size = details.has_video.then_some((details.width, details.height));
+                    let clip = self.project.new_media_clip(&file, self.frame, size, details.seconds);
+                    self.project.duration = self.project.duration.max(clip.end + self.project.fps);
+                    self.project.clips.push(clip);
+                    self.selected = Some(self.project.clips.len() - 1);
+                }
+                None => self.status = "This file could not be opened".into(),
+            }
         }
     }
 
@@ -388,15 +447,30 @@ impl App {
         let size = if area.x / area.y > aspect { Vec2::new(area.y * aspect, area.y) } else { Vec2::new(area.x, area.x / aspect) };
         let pixels = ui.ctx().pixels_per_point();
         let scale = (size.x * pixels / self.project.width as f32).clamp(0.05, 1.0);
-        let stale = self.rendered.as_ref().is_none_or(|(frame, project, s)| *frame != self.frame || *s != scale || *project != self.project);
+        let fps = self.project.fps as f64;
+        let time = self.frame;
+        let wants: Vec<FrameWant> = self
+            .project
+            .clips
+            .iter()
+            .filter(|clip| clip.visible && time >= clip.start && time < clip.end && self.project.tracks.get(clip.track).is_some_and(|track| track.kind == TrackKind::Video))
+            .filter_map(|clip| {
+                let path = clip.media.clone()?;
+                Some(FrameWant { path, seconds: (time - clip.start + clip.offset) as f64 / fps, scale })
+            })
+            .collect();
+        self.frames.want(wants);
+        let generation = self.frames.generation();
+        let stale = self.rendered.as_ref().is_none_or(|(frame, project, s, g)| *frame != self.frame || *s != scale || *g != generation || *project != self.project);
         if stale {
-            render(&self.project, self.frame, scale, &mut self.preview);
+            let frames = self.frames.clone();
+            render(&self.project, self.frame, scale, &mut self.preview, &|path| frames.latest(path));
             let image = egui::ColorImage::from_rgba_unmultiplied([self.preview.width, self.preview.height], &self.preview.pixels);
             match &mut self.texture {
                 Some(texture) => texture.set(image, egui::TextureOptions::LINEAR),
                 None => self.texture = Some(ui.ctx().load_texture("program", image, egui::TextureOptions::LINEAR)),
             }
-            self.rendered = Some((self.frame, self.project.clone(), scale));
+            self.rendered = Some((self.frame, self.project.clone(), scale, generation));
         }
         ui.allocate_ui_with_layout(area, egui::Layout::centered_and_justified(egui::Direction::TopDown), |ui| {
             if let Some(texture) = &self.texture {
@@ -540,7 +614,11 @@ impl App {
                                     }
                                 }
                             }
-                            Drag::TrimStart => clip.start = frames.min(clip.end - 1),
+                            Drag::TrimStart => {
+                                let start = frames.min(clip.end - 1);
+                                clip.offset = (clip.offset as i64 + start as i64 - clip.start as i64).max(0) as u32;
+                                clip.start = start;
+                            }
                             Drag::TrimEnd => clip.end = (frames + 1).max(clip.start + 1),
                         }
                     }
@@ -563,12 +641,19 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.input(ctx);
         self.tick(ctx);
+        self.sync_audio(ctx);
         self.menu(ctx);
         egui::TopBottomPanel::bottom("timeline").resizable(true).default_height(320.0).min_height(120.0).show(ctx, |ui| {
             ui.horizontal_top(|ui| {
                 self.tools(ui);
                 ui.separator();
-                self.timeline(ui);
+                let meter = Vec2::new(16.0, ui.available_height());
+                let timeline = Vec2::new((ui.available_width() - meter.x - 8.0).max(50.0), ui.available_height());
+                ui.allocate_ui(timeline, |ui| self.timeline(ui));
+                let (bar, painter) = ui.allocate_painter(meter, Sense::hover());
+                painter.rect_filled(bar.rect, 2.0_f32, Color32::from_gray(20));
+                let level = Rect::from_min_max(Pos2::new(bar.rect.left(), bar.rect.bottom() - bar.rect.height() * self.meter), bar.rect.max);
+                painter.rect_filled(level, 2.0_f32, Color32::from_rgb(70, 210, 110));
             });
         });
         egui::SidePanel::left("project").resizable(true).default_width(300.0).show(ctx, |ui| self.project_panel(ui));

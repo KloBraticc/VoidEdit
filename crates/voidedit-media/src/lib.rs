@@ -1,0 +1,290 @@
+use std::collections::{HashMap, VecDeque};
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
+
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use filmcraft_media::{FrameRequest, SharedSource};
+use filmcraft_time::Tick;
+use voidedit_render::Image;
+
+const AUDIO_CHUNK_SECONDS: f64 = 0.05;
+const AUDIO_BUFFER_SECONDS: f64 = 0.2;
+
+pub struct MediaDetails {
+    pub width: u32,
+    pub height: u32,
+    pub seconds: f64,
+    pub has_video: bool,
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[derive(Default, Clone)]
+pub struct Library {
+    sources: Arc<Mutex<HashMap<String, Option<SharedSource>>>>,
+}
+
+impl Library {
+    pub fn source(&self, path: &str) -> Option<SharedSource> {
+        if let Some(found) = lock(&self.sources).get(path) {
+            return found.clone();
+        }
+        let opened = open(path);
+        lock(&self.sources).insert(path.to_string(), opened.clone());
+        opened
+    }
+
+    pub fn details(&self, path: &str) -> Option<MediaDetails> {
+        let source = self.source(path)?;
+        let info = source.info();
+        let video = info.video.as_ref();
+        Some(MediaDetails {
+            width: video.map_or(0, |stream| stream.width),
+            height: video.map_or(0, |stream| stream.height),
+            seconds: info.duration.0 as f64 / filmcraft_time::TICKS_PER_SECOND as f64,
+            has_video: video.is_some(),
+        })
+    }
+}
+
+fn open(path: &str) -> Option<SharedSource> {
+    let result = std::panic::catch_unwind(|| {
+        let file = Path::new(path);
+        filmcraft_media::open_path(file, &filmcraft_codecs::openers())
+    });
+    match result {
+        Ok(Ok(source)) => Some(source),
+        _ => None,
+    }
+}
+
+#[derive(Clone, PartialEq)]
+pub struct FrameWant {
+    pub path: String,
+    pub seconds: f64,
+    pub scale: f32,
+}
+
+#[derive(Default)]
+struct FrameState {
+    wants: Vec<FrameWant>,
+    ready: HashMap<String, (f64, Arc<Image>)>,
+}
+
+#[derive(Clone)]
+pub struct Frames {
+    state: Arc<(Mutex<FrameState>, Condvar)>,
+    generation: Arc<AtomicU64>,
+}
+
+impl Frames {
+    pub fn new(library: Library, on_ready: Box<dyn Fn() + Send>) -> Self {
+        let frames = Self { state: Arc::default(), generation: Arc::default() };
+        let worker = frames.clone();
+        let _ = std::thread::Builder::new().name("decode".into()).spawn(move || worker.run(library, on_ready));
+        frames
+    }
+
+    pub fn want(&self, wants: Vec<FrameWant>) {
+        let (state, signal) = &*self.state;
+        let mut state = lock(state);
+        if state.wants != wants {
+            state.ready.retain(|path, _| wants.iter().any(|want| &want.path == path));
+            state.wants = wants;
+            signal.notify_one();
+        }
+    }
+
+    pub fn latest(&self, path: &str) -> Option<Arc<Image>> {
+        lock(&self.state.0).ready.get(path).map(|(_, image)| image.clone())
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Relaxed)
+    }
+
+    fn run(self, library: Library, on_ready: Box<dyn Fn() + Send>) {
+        let (state, signal) = &*self.state;
+        loop {
+            let next = {
+                let mut guard = lock(state);
+                loop {
+                    let pending = guard.wants.iter().find(|want| guard.ready.get(&want.path).is_none_or(|(seconds, _)| *seconds != want.seconds)).cloned();
+                    match pending {
+                        Some(want) => break want,
+                        None => guard = signal.wait(guard).unwrap_or_else(|poisoned| poisoned.into_inner()),
+                    }
+                }
+            };
+            let image = library.source(&next.path).and_then(|source| decode(&source, &next));
+            let image = image.unwrap_or_else(|| Arc::new(Image { width: 1, height: 1, pixels: vec![0, 0, 0, 0] }));
+            lock(state).ready.insert(next.path, (next.seconds, image));
+            self.generation.fetch_add(1, Ordering::Relaxed);
+            on_ready();
+        }
+    }
+}
+
+fn decode(source: &SharedSource, want: &FrameWant) -> Option<Arc<Image>> {
+    let request = FrameRequest { time: Tick::from_seconds_f64(want.seconds), scale: want.scale };
+    let frame = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| source.video_frame(request))).ok()?.ok()?;
+    let pixels = frame.to_rgba8();
+    Some(Arc::new(Image { width: frame.width as usize, height: frame.height as usize, pixels }))
+}
+
+#[derive(Clone)]
+pub struct AudioClip {
+    pub path: String,
+    pub start: f64,
+    pub end: f64,
+    pub offset: f64,
+    pub gain: f32,
+}
+
+#[derive(Clone)]
+pub struct Audio {
+    clips: Arc<Mutex<Vec<AudioClip>>>,
+    ring: Arc<Mutex<VecDeque<f32>>>,
+    playing: Arc<AtomicBool>,
+    position: Arc<AtomicI64>,
+    rate: Arc<AtomicU32>,
+    peak: Arc<AtomicU32>,
+}
+
+impl Audio {
+    pub fn new(library: Library) -> Self {
+        let audio = Self {
+            clips: Arc::default(),
+            ring: Arc::default(),
+            playing: Arc::default(),
+            position: Arc::default(),
+            rate: Arc::new(AtomicU32::new(48_000)),
+            peak: Arc::default(),
+        };
+        let worker = audio.clone();
+        let _ = std::thread::Builder::new().name("audio".into()).spawn(move || worker.run(library));
+        audio
+    }
+
+    pub fn set_clips(&self, clips: Vec<AudioClip>) {
+        *lock(&self.clips) = clips;
+    }
+
+    pub fn play(&self, seconds: f64) {
+        lock(&self.ring).clear();
+        let rate = self.rate.load(Ordering::Relaxed) as f64;
+        self.position.store((seconds * rate) as i64, Ordering::Relaxed);
+        self.playing.store(true, Ordering::Relaxed);
+    }
+
+    pub fn stop(&self) {
+        self.playing.store(false, Ordering::Relaxed);
+        lock(&self.ring).clear();
+    }
+
+    pub fn peak(&self) -> f32 {
+        f32::from_bits(self.peak.swap(0, Ordering::Relaxed))
+    }
+
+    fn open_output(&self) -> Option<cpal::Stream> {
+        let device = cpal::default_host().default_output_device()?;
+        let config = device.default_output_config().ok()?;
+        self.rate.store(config.sample_rate().0, Ordering::Relaxed);
+        let channels = config.channels() as usize;
+        let ring = self.ring.clone();
+        let peak = self.peak.clone();
+        let stream = device
+            .build_output_stream(
+                &config.into(),
+                move |output: &mut [f32], _| {
+                    let mut ring = lock(&ring);
+                    let mut loudest = f32::from_bits(peak.load(Ordering::Relaxed));
+                    for frame in output.chunks_mut(channels.max(1)) {
+                        let left = ring.pop_front().unwrap_or(0.0);
+                        let right = ring.pop_front().unwrap_or(left);
+                        loudest = loudest.max(left.abs()).max(right.abs());
+                        for (index, sample) in frame.iter_mut().enumerate() {
+                            *sample = if index % 2 == 0 { left } else { right };
+                        }
+                    }
+                    peak.store(loudest.to_bits(), Ordering::Relaxed);
+                },
+                |_| {},
+                None,
+            )
+            .ok()?;
+        stream.play().ok()?;
+        Some(stream)
+    }
+
+    fn run(self, library: Library) {
+        let _stream = self.open_output();
+        loop {
+            let rate = self.rate.load(Ordering::Relaxed);
+            let target = (rate as f64 * AUDIO_BUFFER_SECONDS) as usize * 2;
+            if !self.playing.load(Ordering::Relaxed) || lock(&self.ring).len() >= target {
+                std::thread::sleep(Duration::from_millis(15));
+                continue;
+            }
+            let frames = (rate as f64 * AUDIO_CHUNK_SECONDS) as usize;
+            let start = self.position.fetch_add(frames as i64, Ordering::Relaxed);
+            let clips = lock(&self.clips).clone();
+            let mixed = mix(&library, &clips, start, frames, rate);
+            if self.playing.load(Ordering::Relaxed) {
+                lock(&self.ring).extend(mixed);
+            }
+        }
+    }
+}
+
+fn mix(library: &Library, clips: &[AudioClip], start: i64, frames: usize, rate: u32) -> Vec<f32> {
+    let mut mixed = vec![0.0f32; frames * 2];
+    let time = start as f64 / rate as f64;
+    let length = frames as f64 / rate as f64;
+    for clip in clips {
+        if time + length <= clip.start || time >= clip.end {
+            continue;
+        }
+        let Some(source) = library.source(&clip.path) else { continue };
+        if source.info().audio().is_none() {
+            continue;
+        }
+        let from = ((time - clip.start + clip.offset) * rate as f64) as i64;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| source.audio(from.max(0), frames, rate)));
+        let Ok(Ok(buffer)) = result else { continue };
+        let left = buffer.channels.first();
+        let right = buffer.channels.get(1).or(left);
+        if let (Some(left), Some(right)) = (left, right) {
+            for index in 0..frames.min(left.len()).min(right.len()) {
+                mixed[index * 2] += left[index] * clip.gain;
+                mixed[index * 2 + 1] += right[index] * clip.gain;
+            }
+        }
+    }
+    for sample in &mut mixed {
+        *sample = sample.clamp(-1.0, 1.0);
+    }
+    mixed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_files_do_not_crash() {
+        let library = Library::default();
+        assert!(library.source("does-not-exist.mp4").is_none());
+        assert!(library.details("does-not-exist.mp4").is_none());
+    }
+
+    #[test]
+    fn mix_with_no_clips_is_silent() {
+        let mixed = mix(&Library::default(), &[], 0, 8, 48_000);
+        assert_eq!(mixed, vec![0.0; 16]);
+    }
+}
