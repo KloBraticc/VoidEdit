@@ -825,6 +825,10 @@ impl App {
         match self.library.details(file) {
             Some(details) => {
                 let size = details.has_video.then_some((details.width, details.height));
+                if let Some((width, height)) = size.filter(|size| size.0 > 0 && size.1 > 0 && !self.project.clips.iter().any(|clip| clip.media.is_some())) {
+                    self.project.width = (width & !1).max(2);
+                    self.project.height = (height & !1).max(2);
+                }
                 let clip = self.project.new_media_clip(file, self.frame, size, details.seconds);
                 self.push_clip(clip);
             }

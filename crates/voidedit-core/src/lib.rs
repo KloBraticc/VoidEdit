@@ -824,7 +824,7 @@ impl Project {
             Some((width, height)) => {
                 clip.width = width as f32;
                 clip.height = height as f32;
-                let fit = (self.width as f32 / clip.width.max(1.0)).min(self.height as f32 / clip.height.max(1.0));
+                let fit = (self.width as f32 / clip.width.max(1.0)).max(self.height as f32 / clip.height.max(1.0));
                 clip.scale = Param::new(fit * 100.0);
             }
             None => clip.track = self.track_of(TrackKind::Audio),
