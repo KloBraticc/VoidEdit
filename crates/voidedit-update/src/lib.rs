@@ -44,6 +44,9 @@ pub fn verify(data: &[u8], digest: &str) -> bool {
 }
 
 pub fn check_and_install(current: &str) -> Result<Option<String>, String> {
+    if cfg!(debug_assertions) {
+        return Ok(None);
+    }
     let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(120)).user_agent("VoidEdit").build();
     let release: serde_json::Value = agent.get(LATEST).call().map_err(|e| e.to_string())?.into_json().map_err(|e| e.to_string())?;
     let tag = release["tag_name"].as_str().ok_or("the release has no tag")?;

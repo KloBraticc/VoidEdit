@@ -1,3 +1,5 @@
+pub mod expression;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -18,14 +20,24 @@ pub struct Key {
 pub struct Param {
     pub base: f32,
     pub keys: Vec<Key>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expression: Option<String>,
 }
 
 impl Param {
     pub fn new(base: f32) -> Self {
-        Self { base, keys: Vec::new() }
+        Self { base, keys: Vec::new(), expression: None }
     }
 
     pub fn at(&self, frame: f32) -> f32 {
+        let value = self.keyed(frame);
+        match &self.expression {
+            Some(text) => expression::evaluate(text, value, frame).unwrap_or(value),
+            None => value,
+        }
+    }
+
+    fn keyed(&self, frame: f32) -> f32 {
         let (Some(first), Some(last)) = (self.keys.first(), self.keys.last()) else {
             return self.base;
         };
@@ -100,6 +112,10 @@ pub enum Effect {
     Blur { radius: Param },
     FlipHorizontal,
     FlipVertical,
+    Solarize { level: Param },
+    Vibrance { amount: Param },
+    Duotone { dark: [u8; 3], light: [u8; 3] },
+    Mirror,
     HueShift { degrees: Param },
     Gamma { amount: Param },
     Levels { black: Param, white: Param },
@@ -152,6 +168,7 @@ pub enum MaskShape {
     None,
     Rectangle,
     Ellipse,
+    Polygon,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -164,15 +181,17 @@ pub struct Mask {
     pub height: f32,
     pub feather: f32,
     pub invert: bool,
+    pub points: Vec<[f32; 2]>,
 }
 
 impl Default for Mask {
     fn default() -> Self {
-        Self { shape: MaskShape::None, x: 0.5, y: 0.5, width: 0.6, height: 0.6, feather: 0.05, invert: false }
+        Self { shape: MaskShape::None, x: 0.5, y: 0.5, width: 0.6, height: 0.6, feather: 0.05, invert: false, points: Vec::new() }
     }
 }
 
-pub const EFFECT_NAMES: [&str; 30] = [
+pub const EFFECT_NAMES: [&str; 34] = [
+    "Solarize", "Vibrance", "Duotone", "Mirror",
     "Color Wheels", "Curves", "LUT", "Sharpen", "Glow", "Edge Detect", "Drop Shadow", "Wave",
     "Hue Shift", "Gamma", "Levels", "Color Balance", "Threshold", "Noise", "Chroma Key",
     "Brightness", "Tint", "Invert", "Grayscale", "Sepia", "Contrast", "Saturation", "Exposure", "Temperature", "Posterize", "Vignette", "Pixelate", "Blur", "Flip Horizontal", "Flip Vertical",
@@ -204,6 +223,10 @@ impl Effect {
             "Edge Detect" => Effect::EdgeDetect,
             "Drop Shadow" => Effect::DropShadow { x: Param::new(12.0), y: Param::new(12.0), opacity: Param::new(60.0) },
             "Wave" => Effect::Wave { amplitude: Param::new(10.0), frequency: Param::new(8.0) },
+            "Solarize" => Effect::Solarize { level: Param::new(128.0) },
+            "Vibrance" => Effect::Vibrance { amount: Param::new(30.0) },
+            "Duotone" => Effect::Duotone { dark: [30, 10, 80], light: [255, 220, 120] },
+            "Mirror" => Effect::Mirror,
             "Hue Shift" => Effect::HueShift { degrees: Param::new(0.0) },
             "Gamma" => Effect::Gamma { amount: Param::new(1.0) },
             "Levels" => Effect::Levels { black: Param::new(0.0), white: Param::new(255.0) },
@@ -240,6 +263,10 @@ impl Effect {
             Effect::EdgeDetect => "Edge Detect",
             Effect::DropShadow { .. } => "Drop Shadow",
             Effect::Wave { .. } => "Wave",
+            Effect::Solarize { .. } => "Solarize",
+            Effect::Vibrance { .. } => "Vibrance",
+            Effect::Duotone { .. } => "Duotone",
+            Effect::Mirror => "Mirror",
             Effect::HueShift { .. } => "Hue Shift",
             Effect::Gamma { .. } => "Gamma",
             Effect::Levels { .. } => "Levels",
@@ -370,6 +397,14 @@ pub struct Track {
     pub muted: bool,
     #[serde(default)]
     pub locked: bool,
+    #[serde(default = "default_track_volume")]
+    pub volume: f32,
+    #[serde(default)]
+    pub pan: f32,
+}
+
+fn default_track_volume() -> f32 {
+    100.0
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -409,7 +444,7 @@ impl Default for Project {
 
 impl Track {
     pub fn new(name: &str, kind: TrackKind) -> Self {
-        Self { name: name.into(), kind, muted: false, locked: false }
+        Self { name: name.into(), kind, muted: false, locked: false, volume: 100.0, pan: 0.0 }
     }
 }
 

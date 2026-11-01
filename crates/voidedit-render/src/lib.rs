@@ -38,6 +38,9 @@ pub enum Op {
     Threshold(f32),
     Wheels([f32; 3], [f32; 3], [f32; 3]),
     Curve(f32, f32, f32),
+    Solarize(f32),
+    Vibrance(f32),
+    Duotone([f32; 3], [f32; 3]),
 }
 
 pub struct Lut {
@@ -134,6 +137,7 @@ pub struct Resolved {
     pub lut: Option<Arc<Lut>>,
     pub wave: (f32, f32),
     pub space: Option<Space>,
+    pub mirror: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -202,6 +206,20 @@ fn mask_alpha(mask: &voidedit_core::Mask, u: f32, v: f32) -> f32 {
     if mask.shape == MaskShape::None {
         return 1.0;
     }
+    if mask.shape == MaskShape::Polygon {
+        if mask.points.len() < 3 {
+            return 1.0;
+        }
+        let mut inside = false;
+        let mut previous = mask.points[mask.points.len() - 1];
+        for point in &mask.points {
+            if (point[1] > v) != (previous[1] > v) && u < (previous[0] - point[0]) * (v - point[1]) / (previous[1] - point[1]) + point[0] {
+                inside = !inside;
+            }
+            previous = *point;
+        }
+        return if inside != mask.invert { 1.0 } else { 0.0 };
+    }
     let (dx, dy) = ((u - mask.x) / (mask.width / 2.0).max(0.001), (v - mask.y) / (mask.height / 2.0).max(0.001));
     let distance = match mask.shape {
         MaskShape::Ellipse => (dx * dx + dy * dy).sqrt(),
@@ -263,6 +281,18 @@ fn apply(ops: &[Op], mut color: [f32; 3]) -> [f32; 3] {
                     let value = (color[index] / 255.0 * gain[index] + lift[index]).max(0.0);
                     color[index] = value.powf(1.0 / gamma[index].max(0.05)) * 255.0;
                 }
+            }
+            Op::Solarize(level) => color = color.map(|channel| if channel > level { 255.0 - channel } else { channel }),
+            Op::Vibrance(amount) => {
+                let gray = luma(color);
+                let peak = color[0].max(color[1]).max(color[2]);
+                let low = color[0].min(color[1]).min(color[2]);
+                let boost = 1.0 + amount * (1.0 - (peak - low) / 255.0);
+                color = color.map(|channel| gray + (channel - gray) * boost);
+            }
+            Op::Duotone(dark, light) => {
+                let t = (luma(color) / 255.0).clamp(0.0, 1.0);
+                color = [dark[0] + (light[0] - dark[0]) * t, dark[1] + (light[1] - dark[1]) * t, dark[2] + (light[2] - dark[2]) * t];
             }
             Op::Curve(shadows, midtones, highlights) => {
                 color = color.map(|channel| {
@@ -407,6 +437,7 @@ fn resolve(clip: &Clip, frame: f32, scale: f32, image: Option<Arc<Image>>) -> Op
     let mut pixelate = 0.0;
     let mut radius = 0.0f32;
     let (mut flip_x, mut flip_y) = (false, false);
+    let mut mirror = false;
     for effect in &clip.effects {
         match effect {
             Effect::Brightness { amount } => ops.push(Op::Gain(1.0 + amount.at(frame) / 100.0)),
@@ -427,6 +458,10 @@ fn resolve(clip: &Clip, frame: f32, scale: f32, image: Option<Arc<Image>>) -> Op
             Effect::ColorWheels { lift, gamma, gain } => ops.push(Op::Wheels(*lift, *gamma, *gain)),
             Effect::Curves { shadows, midtones, highlights } => ops.push(Op::Curve(shadows.at(frame), midtones.at(frame), highlights.at(frame))),
             Effect::Lut { .. } | Effect::Sharpen { .. } | Effect::Glow { .. } | Effect::EdgeDetect | Effect::DropShadow { .. } | Effect::Wave { .. } => {}
+            Effect::Solarize { level } => ops.push(Op::Solarize(level.at(frame))),
+            Effect::Vibrance { amount } => ops.push(Op::Vibrance(amount.at(frame) / 100.0)),
+            Effect::Duotone { dark, light } => ops.push(Op::Duotone(dark.map(|channel| channel as f32), light.map(|channel| channel as f32))),
+            Effect::Mirror => mirror = true,
             Effect::HueShift { degrees } => ops.push(Op::Hue(degrees.at(frame).to_radians())),
             Effect::Gamma { amount } => ops.push(Op::Gamma(1.0 / amount.at(frame).max(0.05))),
             Effect::Levels { black, white } => ops.push(Op::Levels(black.at(frame), white.at(frame))),
@@ -519,6 +554,7 @@ fn resolve(clip: &Clip, frame: f32, scale: f32, image: Option<Arc<Image>>) -> Op
         lut,
         wave,
         space: space_of(clip, frame, scale),
+        mirror,
     })
 }
 
@@ -531,6 +567,9 @@ fn sample(layer: &Resolved, lx: f32, ly: f32) -> Option<([f32; 3], f32)> {
     }
     if layer.flip_y {
         v = 1.0 - v;
+    }
+    if layer.mirror {
+        u = 1.0 - (u * 2.0 - 1.0).abs();
     }
     if layer.pixelate > 1.0 {
         let (step_u, step_v) = (layer.pixelate / image.width.max(1) as f32, layer.pixelate / image.height.max(1) as f32);
@@ -680,6 +719,7 @@ pub fn layers(project: &Project, frame: u32, scale: f32, images: &dyn Fn(&str) -
                     lut: None,
                     wave: main.wave,
                     space: main.space,
+                    mirror: main.mirror,
                 }),
                 _ => None,
             });

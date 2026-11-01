@@ -54,6 +54,12 @@ fn encode_ops(ops: &[Op]) -> (Vec<[f32; 4]>, bool) {
                 out.push([gamma[0], gamma[1], gamma[2], 0.0]);
             }
             Op::Curve(a, b, c) => out.push([15.0, a, b, c]),
+            Op::Solarize(level) => out.push([16.0, level, 0.0, 0.0]),
+            Op::Vibrance(amount) => out.push([17.0, amount, 0.0, 0.0]),
+            Op::Duotone(dark, light) => {
+                out.push([18.0, dark[0], dark[1], dark[2]]);
+                out.push([light[0], light[1], light[2], 0.0]);
+            }
         }
     }
     let fits = out.len() <= 48;
@@ -63,7 +69,7 @@ fn encode_ops(ops: &[Op]) -> (Vec<[f32; 4]>, bool) {
 
 fn encode_layer(layer: &Resolved, width: f32, height: f32) -> Option<Vec<u8>> {
     let (ops, fits) = encode_ops(&layer.ops);
-    if !fits || layer.lut.is_some() {
+    if !fits || layer.lut.is_some() || layer.mirror || layer.mask.shape == MaskShape::Polygon {
         return None;
     }
     let (encoded_shape, baked) = if layer.image.is_some() {
@@ -79,6 +85,7 @@ fn encode_layer(layer: &Resolved, width: f32, height: f32) -> Option<Vec<u8>> {
         MaskShape::None => 0.0,
         MaskShape::Rectangle => 1.0,
         MaskShape::Ellipse => 2.0,
+        MaskShape::Polygon => 0.0,
     };
     let space = layer.space;
     let across = space.map_or([0.0; 4], |value| [value.across[0], value.across[1], value.across[2], value.depth]);

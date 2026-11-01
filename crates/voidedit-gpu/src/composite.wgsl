@@ -73,6 +73,16 @@ fn apply_ops(start: vec3<f32>) -> vec3<f32> {
                 let t = clamp(c / 255.0, vec3<f32>(0.0), vec3<f32>(1.0));
                 c = c + ((1.0 - t) * (1.0 - t) * head.y + 2.0 * t * (1.0 - t) * head.z + t * t * head.w) * 1.27;
             }
+            case 16: { c = select(c, 255.0 - c, c > vec3<f32>(head.y)); }
+            case 17: {
+                let g = luma(c);
+                let spread = max(max(c.r, c.g), c.b) - min(min(c.r, c.g), c.b);
+                c = g + (c - g) * (1.0 + head.y * (1.0 - spread / 255.0));
+            }
+            case 18: {
+                c = mix(head.yzw, layer.ops[i].xyz, clamp(luma(c) / 255.0, 0.0, 1.0));
+                i += 1;
+            }
             default: {}
         }
     }

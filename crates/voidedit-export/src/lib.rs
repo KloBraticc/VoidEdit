@@ -34,9 +34,9 @@ pub fn audio_clips(project: &Project) -> Vec<AudioClip> {
                 start,
                 end,
                 offset: clip.offset as f64 / fps,
-                gain: Gain { level: clip.volume.base.max(0.0) / 100.0, start, end, fade_in: clip.fade_in as f64 / fps, fade_out: clip.fade_out as f64 / fps },
+                gain: Gain { level: clip.volume.base.max(0.0) / 100.0 * project.tracks.get(clip.track).map_or(1.0, |track| track.volume.max(0.0) / 100.0), start, end, fade_in: clip.fade_in as f64 / fps, fade_out: clip.fade_out as f64 / fps },
                 speed: clip.speed,
-                pan: clip.pan.clamp(-1.0, 1.0),
+                pan: (clip.pan + project.tracks.get(clip.track).map_or(0.0, |track| track.pan)).clamp(-1.0, 1.0),
                 bass: clip.bass,
                 treble: clip.treble,
             })

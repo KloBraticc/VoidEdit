@@ -63,6 +63,8 @@ pub struct App {
     clipboard: Option<Clip>,
     tool: Tool,
     left: LeftTab,
+    drawing_mask: bool,
+    show_mixer: bool,
     drag: Option<(usize, Drag)>,
     zoom: f32,
     scroll: f32,
@@ -117,6 +119,8 @@ impl App {
             clipboard: None,
             tool: Tool::Select,
             left: LeftTab::Project,
+            drawing_mask: false,
+            show_mixer: false,
             drag: None,
             zoom: 6.0,
             scroll: 0.0,
@@ -638,6 +642,7 @@ impl App {
                     ui.checkbox(&mut self.show_project, "Project panel");
                     ui.checkbox(&mut self.show_controls, "Effect Controls panel");
                     ui.checkbox(&mut self.show_timeline, "Timeline");
+                    ui.checkbox(&mut self.show_mixer, "Audio mixer");
                     if ui.button("Fit timeline").clicked() {
                         self.scroll = 0.0;
                         self.zoom = (1100.0 / self.project.end_frame().max(30) as f32).clamp(0.2, 60.0);
@@ -694,6 +699,20 @@ impl App {
             self.settings.save();
             self.apply_style();
         }
+        let mut show_mixer = self.show_mixer;
+        egui::Window::new("Audio Mixer").open(&mut show_mixer).resizable(false).show(ctx, |ui| {
+            ui.horizontal_top(|ui| {
+                for track in self.project.tracks.iter_mut().filter(|track| track.kind == TrackKind::Audio) {
+                    ui.vertical(|ui| {
+                        ui.strong(&track.name);
+                        ui.add(egui::Slider::new(&mut track.volume, 0.0..=200.0).vertical());
+                        ui.add(egui::Slider::new(&mut track.pan, -1.0..=1.0).text("Pan"));
+                        ui.checkbox(&mut track.muted, "Mute");
+                    });
+                }
+            });
+        });
+        self.show_mixer = show_mixer;
         let mut go = false;
         let mut show_export = self.show_export;
         egui::Window::new("Export").open(&mut show_export).collapsible(false).resizable(false).show(ctx, |ui| {
@@ -860,6 +879,15 @@ impl App {
             if ui.add(egui::DragValue::new(&mut value).speed(speed).max_decimals(1)).changed() {
                 param.set(frame, value);
             }
+            let has_expression = param.expression.is_some();
+            let mark = RichText::new("=").color(if has_expression { accent } else { Color32::DARK_GRAY });
+            ui.menu_button(mark, |ui| {
+                ui.label(RichText::new("value, frame, time, sin, cos, abs, min, max, wiggle").small().weak());
+                let mut text = param.expression.clone().unwrap_or_default();
+                if ui.add(egui::TextEdit::singleline(&mut text).hint_text("value + sin(time * 2) * 50")).changed() {
+                    param.expression = (!text.trim().is_empty()).then_some(text);
+                }
+            });
         });
     }
 
@@ -927,11 +955,20 @@ impl App {
             });
             egui::CollapsingHeader::new("Mask").default_open(false).show(ui, |ui| {
                 egui::ComboBox::from_label("Shape").selected_text(format!("{:?}", clip.mask.shape)).show_ui(ui, |ui| {
-                    for shape in [MaskShape::None, MaskShape::Rectangle, MaskShape::Ellipse] {
+                    for shape in [MaskShape::None, MaskShape::Rectangle, MaskShape::Ellipse, MaskShape::Polygon] {
                         ui.selectable_value(&mut clip.mask.shape, shape, format!("{shape:?}"));
                     }
                 });
-                if clip.mask.shape != MaskShape::None {
+                if clip.mask.shape == MaskShape::Polygon {
+                    ui.horizontal(|ui| {
+                        ui.toggle_value(&mut self.drawing_mask, "Draw on preview");
+                        if ui.button("Clear points").clicked() {
+                            clip.mask.points.clear();
+                        }
+                        ui.label(format!("{} points", clip.mask.points.len()));
+                    });
+                    ui.checkbox(&mut clip.mask.invert, "Invert");
+                } else if clip.mask.shape != MaskShape::None {
                     ui.add(egui::Slider::new(&mut clip.mask.x, 0.0..=1.0).text("X"));
                     ui.add(egui::Slider::new(&mut clip.mask.y, 0.0..=1.0).text("Y"));
                     ui.add(egui::Slider::new(&mut clip.mask.width, 0.01..=2.0).text("Width"));
@@ -1009,7 +1046,15 @@ impl App {
                             Self::param(ui, accent, "Amplitude", amplitude, frame, 0.5);
                             Self::param(ui, accent, "Frequency", frequency, frame, 0.1);
                         }
-                        Effect::EdgeDetect => {}
+                        Effect::EdgeDetect | Effect::Mirror => {}
+                        Effect::Solarize { level } => Self::param(ui, accent, "Level", level, frame, 1.0),
+                        Effect::Vibrance { amount } => Self::param(ui, accent, "Amount", amount, frame, 0.5),
+                        Effect::Duotone { dark, light } => {
+                            ui.horizontal(|ui| {
+                                ui.color_edit_button_srgb(dark);
+                                ui.color_edit_button_srgb(light);
+                            });
+                        }
                         Effect::HueShift { degrees } => Self::param(ui, accent, "Degrees", degrees, frame, 1.0),
                         Effect::Gamma { amount } => Self::param(ui, accent, "Gamma", amount, frame, 0.01),
                         Effect::Levels { black, white } => {
@@ -1074,7 +1119,17 @@ impl App {
         ui.allocate_ui_with_layout(area, egui::Layout::centered_and_justified(egui::Direction::TopDown), |ui| {
             let shown = if self.gpu_used { self.gpu_texture } else { self.texture.as_ref().map(egui::TextureHandle::id) };
             if let Some(id) = shown {
-                ui.add(egui::Image::new((id, size)).fit_to_exact_size(size).corner_radius(4));
+                let picture = ui.add(egui::Image::new((id, size)).fit_to_exact_size(size).corner_radius(4).sense(Sense::click()));
+                if self.drawing_mask && picture.clicked() {
+                    if let (Some(position), Some(clip)) = (picture.interact_pointer_pos(), self.selected.and_then(|index| self.project.clips.get_mut(index))) {
+                        let u = (position.x - picture.rect.left()) / picture.rect.width() * self.project.width as f32;
+                        let v = (position.y - picture.rect.top()) / picture.rect.height() * self.project.height as f32;
+                        let scale = clip.scale.at(self.frame as f32).max(0.01) / 100.0;
+                        let (half_w, half_h) = (clip.width * scale / 2.0, clip.height * scale / 2.0);
+                        let (x, y) = (clip.x.at(self.frame as f32), clip.y.at(self.frame as f32));
+                        clip.mask.points.push([(u - x + half_w) / (half_w * 2.0).max(1.0), (v - y + half_h) / (half_h * 2.0).max(1.0)]);
+                    }
+                }
             }
         });
         let accent = self.accent();
