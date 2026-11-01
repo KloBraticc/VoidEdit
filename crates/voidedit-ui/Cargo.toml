@@ -16,6 +16,9 @@ serde.workspace = true
 serde_json.workspace = true
 eframe.workspace = true
 rfd.workspace = true
+egui-phosphor = "0.9"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "bmp"] }
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"
+window-vibrancy = "0.8"

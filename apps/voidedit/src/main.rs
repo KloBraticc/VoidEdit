@@ -26,7 +26,7 @@ fn run(renderer: eframe::Renderer, project: Option<std::ffi::OsString>) -> efram
     });
     let options = eframe::NativeOptions {
         renderer,
-        viewport: eframe::egui::ViewportBuilder::default().with_title("Void Edit").with_inner_size([1500.0, 950.0]).with_min_inner_size([900.0, 600.0]).with_icon(icon()),
+        viewport: eframe::egui::ViewportBuilder::default().with_title("Void Edit").with_transparent(true).with_inner_size([1500.0, 950.0]).with_min_inner_size([900.0, 600.0]).with_icon(icon()),
         ..Default::default()
     };
     eframe::run_native(
