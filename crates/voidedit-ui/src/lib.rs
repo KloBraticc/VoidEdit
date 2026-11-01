@@ -18,6 +18,8 @@ use voidedit_render::{render, Frame};
 
 pub(crate) const TOP_BAR_HEIGHT: f32 = 36.0;
 const SNAP_PIXELS: f32 = 8.0;
+const PLAYBACK_MAX_WIDTH: f32 = 1280.0;
+const DECODE_AHEAD: u32 = 3;
 const HIT_CAPTION: usize = 2;
 const MAX_TEXTURE_SIDE: u32 = 2048;
 const HEADER_WIDTH: f32 = 112.0;
@@ -108,7 +110,10 @@ pub struct App {
     show_strip: bool,
     show_inspector: bool,
     bin: usize,
-    blur_history: Vec<u8>,
+    blur_current: Frame,
+    blur_next: Frame,
+    blur_index: Option<u32>,
+    blur_generation: u64,
     volume_before_mute: f32,
     player_full: bool,
     applied_round: Option<bool>,
@@ -240,7 +245,10 @@ impl App {
             show_strip: true,
             show_inspector: true,
             bin: 0,
-            blur_history: Vec::new(),
+            blur_current: Frame::default(),
+            blur_next: Frame::default(),
+            blur_index: None,
+            blur_generation: 0,
             volume_before_mute: 100.0,
             player_full: false,
             applied_round: None,
@@ -2593,6 +2601,7 @@ impl App {
         let pixels = ui.ctx().pixels_per_point();
         let largest = self.project.width.max(self.project.height).max(1) as f32;
         let scale = (size.x * pixels / self.project.width as f32 * self.settings.preview_quality).clamp(0.05, 1.0).min(MAX_TEXTURE_SIDE as f32 / largest);
+        let scale = if self.playing { scale.min(PLAYBACK_MAX_WIDTH / self.project.width.max(1) as f32) } else { scale };
         let time = self.frame;
         let mut found = Vec::new();
         let cheap_blur = self.playing && self.project.motion_blur.enabled;
@@ -2600,25 +2609,53 @@ impl App {
         for moment in moments {
             self.project.wanted_media_at(time, moment, 0, &mut found);
         }
-        found.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
-        found.dedup();
+        if self.playing {
+            for ahead in 1..=DECODE_AHEAD {
+                self.project.wanted_media(time + ahead, 0, &mut found);
+            }
+        } else {
+            found.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
+            found.dedup();
+        }
         self.frames.want(found.into_iter().map(|(path, seconds)| FrameWant { path, seconds, scale }).collect());
         let generation = self.frames.generation();
         let stale = self.rendered.as_ref().is_none_or(|(frame, project, s, g)| *frame != self.frame || *s != scale || *g != generation || *project != self.project);
-        if stale {
+        if stale || cheap_blur {
             let frames = self.frames.clone();
             if cheap_blur {
-                voidedit_render::render_at(&self.project, self.frame, self.frame as f32, scale, &mut self.preview, &|key| frames.latest(key));
-                if self.blur_history.len() == self.preview.pixels.len() {
-                    let keep = (self.project.motion_blur.shutter.min(1.0) * 0.62 * 256.0) as u32;
-                    for (pixel, old) in self.preview.pixels.iter_mut().zip(self.blur_history.iter()) {
-                        *pixel = ((*pixel as u32 * (256 - keep) + *old as u32 * keep) >> 8) as u8;
+                let wanted = self.frame;
+                let images = |key: &str| frames.latest(key);
+                let size_changed = self.blur_current.width != ((self.project.width as f32 * scale) as usize).max(1);
+                if self.blur_index != Some(wanted) || size_changed {
+                    if self.blur_index == wanted.checked_sub(1) && !size_changed {
+                        std::mem::swap(&mut self.blur_current, &mut self.blur_next);
+                    } else {
+                        voidedit_render::render_at(&self.project, wanted, wanted as f32, scale, &mut self.blur_current, &images);
                     }
+                    voidedit_render::render_at(&self.project, wanted + 1, wanted as f32 + 1.0, scale, &mut self.blur_next, &images);
+                    self.blur_index = Some(wanted);
+                    self.blur_generation = generation;
+                } else if self.blur_generation != generation {
+                    voidedit_render::render_at(&self.project, wanted, wanted as f32, scale, &mut self.blur_current, &images);
+                    voidedit_render::render_at(&self.project, wanted + 1, wanted as f32 + 1.0, scale, &mut self.blur_next, &images);
+                    self.blur_generation = generation;
                 }
-                self.blur_history.clear();
-                self.blur_history.extend_from_slice(&self.preview.pixels);
+                let amount = ((self.remainder * self.project.motion_blur.shutter.clamp(0.0, 1.0)) * 256.0) as u32;
+                self.preview.width = self.blur_current.width;
+                self.preview.height = self.blur_current.height;
+                self.preview.pixels.resize(self.blur_current.pixels.len(), 255);
+                if self.blur_next.pixels.len() == self.blur_current.pixels.len() {
+                    use rayon::prelude::*;
+                    self.preview.pixels.par_chunks_mut(4096).zip(self.blur_current.pixels.par_chunks(4096)).zip(self.blur_next.pixels.par_chunks(4096)).for_each(|((out, a), b)| {
+                        for ((pixel, from), to) in out.iter_mut().zip(a).zip(b) {
+                            *pixel = ((*from as u32 * (256 - amount) + *to as u32 * amount) >> 8) as u8;
+                        }
+                    });
+                } else {
+                    self.preview.pixels.copy_from_slice(&self.blur_current.pixels);
+                }
             } else {
-                self.blur_history.clear();
+                self.blur_index = None;
                 render(&self.project, self.frame, scale, &mut self.preview, &|key| frames.latest(key));
             }
             let image = egui::ColorImage::from_rgba_unmultiplied([self.preview.width, self.preview.height], &self.preview.pixels);

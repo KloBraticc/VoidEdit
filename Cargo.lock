@@ -6005,6 +6005,7 @@ dependencies = [
  "egui-phosphor",
  "image",
  "raw-window-handle",
+ "rayon",
  "rfd",
  "serde",
  "serde_json",
