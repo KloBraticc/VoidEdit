@@ -102,7 +102,6 @@ pub struct App {
     snap_line: Option<u32>,
     menu_clip: Option<usize>,
     menu_opened: Instant,
-    tab_changed: Instant,
     show_media: bool,
     show_toolbox: bool,
     show_strip: bool,
@@ -229,9 +228,8 @@ impl App {
             update_status,
             settings,
             show_settings: false,
-            tab_changed: Instant::now(),
             show_media: true,
-            show_toolbox: true,
+            show_toolbox: false,
             show_strip: true,
             show_inspector: true,
             bin: 0,
@@ -1190,11 +1188,13 @@ impl App {
                     self.show_studio = studio;
                 }
                 ui.add_space(8.0);
-                if widgets::icon_toggle(ui, ph::IMAGES, "Media pool", self.show_media, accent).clicked() {
+                if widgets::icon_toggle(ui, ph::IMAGES, "Media", self.show_media, accent).clicked() {
                     self.show_media = !self.show_media;
+                    self.show_toolbox = false;
                 }
                 if widgets::icon_toggle(ui, ph::SPARKLE, "Effects and titles", self.show_toolbox, accent).clicked() {
                     self.show_toolbox = !self.show_toolbox;
+                    self.show_media = false;
                 }
                 if widgets::icon_toggle(ui, ph::MUSIC_NOTES, "Sound library", self.show_studio && self.studio_tab == 2, accent).clicked() {
                     let open = self.show_studio && self.studio_tab == 2;
@@ -1651,48 +1651,35 @@ impl App {
         }
     }
 
-    fn media_pool(&mut self, ui: &mut egui::Ui) {
+    fn library_panel(&mut self, ui: &mut egui::Ui) {
         let accent = self.accent();
-        ui.horizontal_top(|ui| {
-            ui.vertical(|ui| {
-                ui.set_width(92.0);
-                for (index, icon, label) in [(0, ph::FOLDER, "Master"), (1, ph::FILM_STRIP, "Video"), (2, ph::MUSIC_NOTES, "Audio")] {
-                    if widgets::pill(ui, icon, label, self.bin == index, accent).clicked() {
-                        self.bin = index;
-                    }
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            if widgets::stacked(ui, ph::IMAGES, "Media", self.show_media, accent).clicked() {
+                self.show_media = true;
+                self.show_toolbox = false;
+            }
+            for (tab, icon, label) in [(LeftTab::Effects, ph::SPARKLE, "Effects"), (LeftTab::Transitions, ph::ARROWS_LEFT_RIGHT, "Transitions"), (LeftTab::Text, ph::TEXT_T, "Titles"), (LeftTab::Filters, ph::SWATCHES, "Filters"), (LeftTab::Captions, ph::SUBTITLES, "Captions")] {
+                if widgets::stacked(ui, icon, label, !self.show_media && self.left == tab, accent).clicked() {
+                    self.left = tab;
+                    self.show_media = false;
+                    self.show_toolbox = true;
                 }
-            });
-            ui.vertical(|ui| {
-                ui.add(egui::TextEdit::singleline(&mut self.search).hint_text("Search").desired_width(f32::INFINITY));
-                let filter = self.search.to_lowercase();
-                self.media_list(ui, &filter);
-            });
+            }
         });
-    }
-
-    fn toolbox(&mut self, ui: &mut egui::Ui) {
-        let accent = self.accent();
-        let height = ui.available_height();
-        ui.horizontal_top(|ui| {
-            ui.vertical(|ui| {
-                ui.set_width(118.0);
-                for (tab, icon, label) in [(LeftTab::Transitions, ph::ARROWS_LEFT_RIGHT, "Transitions"), (LeftTab::Text, ph::TEXT_T, "Titles"), (LeftTab::Effects, ph::SPARKLE, "Effects"), (LeftTab::Filters, ph::SWATCHES, "Filters"), (LeftTab::Captions, ph::SUBTITLES, "Captions")] {
-                    if widgets::pill(ui, icon, label, self.left == tab, accent).clicked() && self.left != tab {
-                        self.left = tab;
-                        self.tab_changed = Instant::now();
-                    }
-                }
-            });
-            ui.vertical(|ui| {
-                ui.set_min_height(height);
-                let progress = if self.settings.animations { self.tab_changed.elapsed().as_secs_f32() / 0.2 } else { 1.0 };
-                if progress < 1.0 {
-                    ui.ctx().request_repaint();
-                    ui.multiply_opacity(progress);
-                }
-                self.left_content(ui);
-            });
-        });
+        ui.add_space(4.0);
+        if self.show_media {
+            ui.add(egui::TextEdit::singleline(&mut self.search).hint_text("Search media").desired_width(f32::INFINITY));
+            ui.add_space(4.0);
+            let filter = self.search.to_lowercase();
+            self.media_list(ui, &filter);
+        } else {
+            if matches!(self.left, LeftTab::Effects | LeftTab::Transitions | LeftTab::Filters) && self.selected.is_none() {
+                ui.label(RichText::new("Select a clip on the timeline to apply these").small().weak());
+                ui.add_space(2.0);
+            }
+            self.left_content(ui);
+        }
     }
 
     fn mixer(&mut self, ui: &mut egui::Ui) {
@@ -1852,10 +1839,13 @@ impl App {
     fn media_list(&mut self, ui: &mut egui::Ui, filter: &str) {
         let bin = self.bin;
         ui.horizontal(|ui| {
-            if ui.button("Import").clicked() {
+            let accent = self.accent();
+            if widgets::accent_button(ui, "Import", accent).clicked() {
                 self.import();
             }
-            ui.label(RichText::new(format!("{} items", self.project.media.len())).weak());
+            if let Some(bin) = widgets::segment(ui, &[(0usize, ph::FOLDER, "All"), (1, ph::FILM_STRIP, "Video"), (2, ph::MUSIC_NOTES, "Audio")], self.bin, accent) {
+                self.bin = bin;
+            }
         });
         ui.add_space(4.0);
         let mut add = None;
@@ -3141,16 +3131,8 @@ impl App {
             self.timeline(ui);
         });
         if self.show_media || self.show_toolbox {
-            egui::Panel::left("library").resizable(true).default_size(340.0).min_size(260.0).show_separator_line(false).frame(card).show_inside(root, |ui| {
-                if self.show_media && self.show_toolbox {
-                    let half = ui.available_height() / 2.0;
-                    egui::Panel::top("pool").resizable(true).default_size(half).show_separator_line(true).frame(egui::Frame::new()).show_inside(ui, |ui| self.media_pool(ui));
-                    self.toolbox(ui);
-                } else if self.show_media {
-                    self.media_pool(ui);
-                } else {
-                    self.toolbox(ui);
-                }
+            egui::Panel::left("library").resizable(true).default_size(340.0).min_size(320.0).show_separator_line(false).frame(card).show_inside(root, |ui| {
+                self.library_panel(ui);
             });
         }
         if self.show_inspector {
