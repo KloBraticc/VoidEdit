@@ -17,3 +17,6 @@ serde_json.workspace = true
 eframe.workspace = true
 rfd.workspace = true
 egui_dock = { version = "0.16", features = ["serde"] }
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.52"

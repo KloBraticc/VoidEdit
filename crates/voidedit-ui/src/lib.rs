@@ -29,8 +29,13 @@ enum Tool {
 
 #[derive(Clone, Copy, PartialEq)]
 enum LeftTab {
-    Project,
+    Media,
+    Audio,
+    Text,
     Effects,
+    Transitions,
+    Captions,
+    Filters,
 }
 
 #[derive(Clone, Copy)]
@@ -68,9 +73,9 @@ impl TabViewer for Viewer<'_> {
 
     fn title(&mut self, tab: &mut Pane) -> egui::WidgetText {
         match tab {
-            Pane::Media => "Project",
-            Pane::Program => "Program",
-            Pane::Controls => "Effect Controls",
+            Pane::Media => "Library",
+            Pane::Program => "Player",
+            Pane::Controls => "Details",
             Pane::Timeline => "Timeline",
         }
         .into()
@@ -82,8 +87,8 @@ impl TabViewer for Viewer<'_> {
             Pane::Program => self.app.monitor(ui),
             Pane::Controls => self.app.controls_panel(ui),
             Pane::Timeline => {
+                self.app.tools(ui);
                 ui.horizontal_top(|ui| {
-                    self.app.tools(ui);
                     let meter = Vec2::new(16.0, ui.available_height());
                     let timeline = Vec2::new((ui.available_width() - meter.x - 8.0).max(50.0), ui.available_height());
                     ui.allocate_ui(timeline, |ui| self.app.timeline(ui));
@@ -151,6 +156,13 @@ pub struct App {
     clipboard: Option<Clip>,
     tool: Tool,
     left: LeftTab,
+    dragging_media: Option<String>,
+    timeline_rect: Option<(Rect, Vec<usize>)>,
+    scroll_y: f32,
+    snap_line: Option<u32>,
+    menu_clip: Option<usize>,
+    menu_opened: Instant,
+    system_accent: Option<[u8; 3]>,
     dock: Option<DockState<Pane>>,
     drawing_mask: bool,
     captioning: Option<Arc<Mutex<CaptionJob>>>,
@@ -213,7 +225,14 @@ impl App {
             also_selected: Vec::new(),
             clipboard: None,
             tool: Tool::Select,
-            left: LeftTab::Project,
+            left: LeftTab::Media,
+            dragging_media: None,
+            timeline_rect: None,
+            scroll_y: 0.0,
+            snap_line: None,
+            menu_clip: None,
+            menu_opened: Instant::now(),
+            system_accent: settings::system_accent(),
             dock: Some(Settings::folder().and_then(|folder| std::fs::read_to_string(folder.join("layout.json")).ok()).and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_else(default_layout)),
             drawing_mask: false,
             captioning: None,
@@ -324,7 +343,7 @@ impl App {
     }
 
     fn accent(&self) -> Color32 {
-        let [r, g, b] = self.settings.accent;
+        let [r, g, b] = self.system_accent.filter(|_| self.settings.system_accent).unwrap_or(self.settings.accent);
         Color32::from_rgb(r, g, b)
     }
 
@@ -339,6 +358,7 @@ impl App {
         visuals.selection.bg_fill = self.accent();
         visuals.widgets.hovered.bg_fill = self.accent().gamma_multiply(0.45);
         visuals.widgets.active.bg_fill = self.accent();
+        visuals.extreme_bg_color = Color32::from_gray(base.saturating_sub(16));
         visuals.window_corner_radius = 10.into();
         visuals.menu_corner_radius = 8.into();
         visuals.widgets.noninteractive.corner_radius = 5.into();
@@ -548,6 +568,35 @@ impl App {
             }
             repaint.request_repaint();
         });
+    }
+
+    fn finish_media_drag(&mut self, ctx: &egui::Context) {
+        let Some(file) = self.dragging_media.clone() else { return };
+        let pointer = ctx.input(|i| i.pointer.hover_pos());
+        if let Some(position) = pointer {
+            let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("media-drag")));
+            let name = std::path::Path::new(&file).file_name().map_or(file.clone(), |n| n.to_string_lossy().into_owned());
+            painter.text(position + Vec2::new(12.0, 8.0), egui::Align2::LEFT_TOP, name, egui::FontId::proportional(13.0), Color32::WHITE);
+        }
+        if ctx.input(|i| i.pointer.any_down()) {
+            return;
+        }
+        self.dragging_media = None;
+        let (Some(position), Some((rect, order))) = (pointer, self.timeline_rect.clone()) else { return };
+        if !rect.contains(position) || position.x < rect.left() + HEADER_WIDTH {
+            return;
+        }
+        let frame = (((position.x - rect.left() - HEADER_WIDTH) / self.zoom + self.scroll).max(0.0)) as u32;
+        let row = ((position.y - rect.top() - RULER_HEIGHT + self.scroll_y) / TRACK_HEIGHT).max(0.0) as usize;
+        let previous = self.frame;
+        self.frame = frame;
+        self.insert_media(&file);
+        self.frame = previous;
+        if let (Some(track), Some(clip)) = (order.get(row).copied(), self.selected.and_then(|index| self.project.clips.get_mut(index))) {
+            if self.project.tracks.get(track).map(|data| data.kind) == self.project.tracks.get(clip.track).map(|data| data.kind) {
+                clip.track = track;
+            }
+        }
     }
 
     fn insert_media(&mut self, file: &str) {
@@ -950,6 +999,9 @@ impl App {
                 ui.label("Accent color");
                 changed |= ui.color_edit_button_srgb(&mut self.settings.accent).changed();
             });
+            if self.system_accent.is_some() {
+                changed |= ui.checkbox(&mut self.settings.system_accent, "Use the system accent color").changed();
+            }
             changed |= ui.add(egui::Slider::new(&mut self.settings.panel_gray, 15..=70).text("Panel shade")).changed();
             changed |= ui.add(egui::Slider::new(&mut self.settings.ui_scale, 0.6..=2.0).text("Interface size")).changed();
             changed |= ui.add(egui::Slider::new(&mut self.settings.preview_quality, 0.25..=1.0).text("Preview quality")).changed();
@@ -1067,62 +1119,86 @@ impl App {
     }
 
     fn left_panel(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            if self.tab(ui, self.left == LeftTab::Project, "Project") {
-                self.left = LeftTab::Project;
-            }
-            if self.tab(ui, self.left == LeftTab::Effects, "Effects") {
-                self.left = LeftTab::Effects;
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 12.0;
+            for (tab, label) in [(LeftTab::Media, "Media"), (LeftTab::Audio, "Audio"), (LeftTab::Text, "Text"), (LeftTab::Effects, "Effects"), (LeftTab::Transitions, "Transitions"), (LeftTab::Captions, "Captions"), (LeftTab::Filters, "Filters")] {
+                if self.tab(ui, self.left == tab, label) {
+                    self.left = tab;
+                }
             }
         });
-        ui.add_space(4.0);
-        ui.add(egui::TextEdit::singleline(&mut self.search).hint_text("Search").desired_width(f32::INFINITY));
+        ui.add_space(8.0);
+        if matches!(self.left, LeftTab::Media | LeftTab::Audio | LeftTab::Effects | LeftTab::Filters) {
+            ui.add(egui::TextEdit::singleline(&mut self.search).hint_text("Search").desired_width(f32::INFINITY));
+            ui.add_space(4.0);
+        }
         let filter = self.search.to_lowercase();
         match self.left {
-            LeftTab::Project => {
-                ui.horizontal(|ui| {
-                    if ui.button("Import").clicked() {
-                        self.import();
-                    }
-                    if ui.button("Text").clicked() {
+            LeftTab::Media | LeftTab::Audio => self.media_list(ui, &filter),
+            LeftTab::Text => {
+                for (label, size, typewriter) in [("Default text", 96.0, false), ("Large title", 180.0, false), ("Small subtitle", 54.0, false), ("Typewriter", 96.0, true)] {
+                    if ui.add(egui::Button::new(label).min_size(Vec2::new(ui.available_width(), 38.0))).clicked() {
                         self.add_text();
+                        if let Some(clip) = self.selected.and_then(|index| self.project.clips.get_mut(index)) {
+                            clip.text_size = size;
+                            clip.typewriter = typewriter;
+                        }
                     }
-                    ui.label(RichText::new(format!("{} items", self.project.media.len())).weak());
+                }
+            }
+            LeftTab::Transitions => {
+                let selected = self.selected;
+                ui.label(RichText::new(if selected.is_some() { "Click to apply to the selected clip" } else { "Select a clip first" }).weak());
+                for kind in TRANSITIONS {
+                    if ui.add_enabled(selected.is_some(), egui::Button::new(format!("{kind:?}")).min_size(Vec2::new(ui.available_width(), 34.0))).clicked() {
+                        if let Some(clip) = selected.and_then(|index| self.project.clips.get_mut(index)) {
+                            clip.transition_in = kind;
+                            clip.transition_out = kind;
+                            let length = 15.min((clip.end - clip.start) / 2);
+                            clip.fade_in = length;
+                            clip.fade_out = length;
+                        }
+                    }
+                }
+            }
+            LeftTab::Captions => {
+                let current = voidedit_speech::LANGUAGES.iter().find(|(_, code)| *code == self.settings.caption_language).map_or("Detect automatically", |(name, _)| *name);
+                egui::ComboBox::from_label("Spoken language").selected_text(current).height(320.0).show_ui(ui, |ui| {
+                    if ui.selectable_label(self.settings.caption_language == voidedit_speech::AUTO_DETECT, "Detect automatically").clicked() {
+                        self.settings.caption_language = voidedit_speech::AUTO_DETECT.to_string();
+                        self.settings.save();
+                    }
+                    for (name, code) in voidedit_speech::LANGUAGES {
+                        if ui.selectable_label(self.settings.caption_language == code, name).clicked() {
+                            self.settings.caption_language = code.to_string();
+                            self.settings.save();
+                        }
+                    }
                 });
-                ui.separator();
-                let mut add = None;
-                let mut remove = None;
+                ui.add_space(6.0);
+                if ui.add(egui::Button::new("Generate from selected clip").min_size(Vec2::new(ui.available_width(), 36.0))).on_hover_text("Downloads a 144 MB speech model the first time").clicked() {
+                    self.generate_captions();
+                }
+                if ui.add(egui::Button::new("Import SRT file").min_size(Vec2::new(ui.available_width(), 36.0))).clicked() {
+                    self.import_captions();
+                }
+            }
+            LeftTab::Filters => {
+                let selected = self.selected;
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    if self.project.media.is_empty() {
-                        ui.add_space(20.0);
-                        ui.vertical_centered(|ui| ui.label(RichText::new("Drop video, audio or image files here").weak()));
-                    }
-                    for file in &self.project.media {
-                        let name = std::path::Path::new(file).file_name().map_or(file.clone(), |n| n.to_string_lossy().into_owned());
+                    for name in LOOKS {
                         if !filter.is_empty() && !name.to_lowercase().contains(&filter) {
                             continue;
                         }
-                        let response = ui.selectable_label(false, &name).on_hover_text("Click to add at the playhead");
-                        if response.clicked() {
-                            add = Some(file.clone());
-                        }
-                        response.context_menu(|ui| {
-                            if ui.button("Remove from project").clicked() {
-                                remove = Some(file.clone());
-                                ui.close_menu();
+                        if ui.add_enabled(selected.is_some(), egui::Button::new(name).min_size(Vec2::new(ui.available_width(), 34.0))).clicked() {
+                            if let Some(clip) = selected.and_then(|index| self.project.clips.get_mut(index)) {
+                                clip.effects.extend(voidedit_core::look(name));
                             }
-                        });
+                        }
                     }
                 });
-                if let Some(file) = add {
-                    self.insert_media(&file);
-                }
-                if let Some(file) = remove {
-                    self.project.media.retain(|item| item != &file);
-                }
             }
             LeftTab::Effects => {
-                ui.separator();
                 let selected = self.selected;
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     for name in EFFECT_NAMES {
@@ -1161,20 +1237,61 @@ impl App {
                             }
                         });
                     }
-                    ui.separator();
-                    ui.strong("Looks");
-                    for name in LOOKS {
-                        if !filter.is_empty() && !name.to_lowercase().contains(&filter) {
-                            continue;
-                        }
-                        if ui.add_enabled(selected.is_some(), egui::Button::new(name).min_size(Vec2::new(ui.available_width(), 24.0))).clicked() {
-                            if let Some(clip) = selected.and_then(|index| self.project.clips.get_mut(index)) {
-                                clip.effects.extend(voidedit_core::look(name));
-                            }
-                        }
+                });
+            }
+        }
+    }
+
+    fn media_list(&mut self, ui: &mut egui::Ui, filter: &str) {
+        let audio_tab = self.left == LeftTab::Audio;
+        ui.horizontal(|ui| {
+            if ui.button("Import").clicked() {
+                self.import();
+            }
+            ui.label(RichText::new(format!("{} items", self.project.media.len())).weak());
+        });
+        ui.add_space(4.0);
+        let mut add = None;
+        let mut remove = None;
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            if self.project.media.is_empty() {
+                ui.add_space(30.0);
+                ui.vertical_centered(|ui| ui.label(RichText::new("Drop video, audio or image files here").weak()));
+            }
+            for file in &self.project.media {
+                let path = std::path::Path::new(file);
+                let name = path.file_name().map_or(file.clone(), |n| n.to_string_lossy().into_owned());
+                let extension = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+                let is_audio = matches!(extension.as_str(), "mp3" | "wav" | "m4a" | "aac" | "flac" | "ogg" | "opus");
+                if is_audio != audio_tab || (!filter.is_empty() && !name.to_lowercase().contains(filter)) {
+                    continue;
+                }
+                let response = ui.horizontal(|ui| {
+                    if let Some(texture) = self.thumb_textures.get(file) {
+                        ui.image((texture.id(), Vec2::new(64.0, 36.0)));
+                    }
+                    ui.add(egui::Label::new(&name).truncate().sense(Sense::click_and_drag()))
+                });
+                let row = response.inner.on_hover_text("Click to add at the playhead, or drag to the timeline");
+                if row.clicked() {
+                    add = Some(file.clone());
+                }
+                if row.drag_started() {
+                    self.dragging_media = Some(file.clone());
+                }
+                row.context_menu(|ui| {
+                    if ui.button("Remove from project").clicked() {
+                        remove = Some(file.clone());
+                        ui.close_menu();
                     }
                 });
             }
+        });
+        if let Some(file) = add {
+            self.insert_media(&file);
+        }
+        if let Some(file) = remove {
+            self.project.media.retain(|item| item != &file);
         }
     }
 
@@ -1651,24 +1768,119 @@ impl App {
     }
 
     fn tools(&mut self, ui: &mut egui::Ui) {
-        ui.vertical(|ui| {
-            ui.set_width(58.0);
-            for (label, tool, tip) in [("Select", Tool::Select, "Selection (V)"), ("Razor", Tool::Razor, "Razor (C)")] {
+        let accent = self.accent();
+        ui.horizontal(|ui| {
+            for (label, tool, tip) in [("Select", Tool::Select, "Selection (V)"), ("Split", Tool::Razor, "Razor (C)")] {
                 if ui.selectable_label(self.tool == tool, label).on_hover_text(tip).clicked() {
                     self.tool = tool;
                 }
             }
-            if ui.button("Text").on_hover_text("New text (T)").clicked() {
-                self.add_text();
+            ui.separator();
+            if ui.button("Undo").clicked() {
+                self.undo();
+            }
+            if ui.button("Redo").clicked() {
+                self.redo();
+            }
+            if ui.button("Cut here").on_hover_text("Split at the playhead (Ctrl K)").clicked() {
+                self.split_at_playhead();
+            }
+            if ui.button("Delete").clicked() {
+                self.delete_selected(false);
             }
             if ui.button("Marker").on_hover_text("Marker (M)").clicked() {
                 self.toggle_marker();
             }
-            ui.separator();
-            ui.label(RichText::new("Zoom").small().weak());
-            ui.spacing_mut().slider_width = 50.0;
-            ui.add(egui::Slider::new(&mut self.zoom, 0.2..=60.0).logarithmic(true).show_value(false));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.spacing_mut().slider_width = 120.0;
+                ui.add(egui::Slider::new(&mut self.zoom, 0.2..=60.0).logarithmic(true).show_value(false));
+                ui.label(RichText::new("Zoom").weak());
+                let snapping = self.settings.snapping;
+                let text = if snapping { RichText::new("Snap on").color(accent) } else { RichText::new("Snap off").weak() };
+                if ui.button(text).on_hover_text("Clips snap to each other, the playhead and markers").clicked() {
+                    self.settings.snapping = !snapping;
+                    self.settings.save();
+                }
+            });
         });
+        ui.add_space(2.0);
+    }
+
+    fn timeline_menu(&mut self, ui: &mut egui::Ui) {
+        if self.menu_opened.elapsed().as_millis() < 250 {
+            ui.disable();
+            ui.ctx().request_repaint();
+        }
+        if let Some(index) = self.menu_clip.filter(|index| *index < self.project.clips.len()) {
+            if ui.button("Split at playhead").clicked() {
+                self.split_at_playhead();
+                ui.close_menu();
+            }
+            if ui.button("Copy").clicked() {
+                self.copy();
+                ui.close_menu();
+            }
+            if ui.button("Duplicate").clicked() {
+                self.copy();
+                self.paste();
+                ui.close_menu();
+            }
+            if ui.button("Nest").clicked() {
+                self.project.nest(index);
+                self.selected = Some(self.project.clips.len() - 1);
+                self.menu_clip = None;
+                ui.close_menu();
+                return;
+            }
+            let clip = &mut self.project.clips[index];
+            let muted = clip.muted;
+            if ui.button(if muted { "Unmute" } else { "Mute" }).clicked() {
+                clip.muted = !muted;
+                ui.close_menu();
+            }
+            let visible = clip.visible;
+            if ui.button(if visible { "Hide" } else { "Show" }).clicked() {
+                clip.visible = !visible;
+                ui.close_menu();
+            }
+            if ui.button("Reset speed").clicked() {
+                clip.speed = 1.0;
+                ui.close_menu();
+            }
+            ui.separator();
+            if ui.button("Delete").clicked() {
+                self.delete_selected(false);
+                self.menu_clip = None;
+                ui.close_menu();
+            }
+            if ui.button("Ripple delete").clicked() {
+                self.delete_selected(true);
+                self.menu_clip = None;
+                ui.close_menu();
+            }
+        } else {
+            if ui.add_enabled(self.clipboard.is_some(), egui::Button::new("Paste")).clicked() {
+                self.paste();
+                ui.close_menu();
+            }
+            if ui.button("Add text").clicked() {
+                self.add_text();
+                ui.close_menu();
+            }
+            if ui.button("Add marker").clicked() {
+                self.toggle_marker();
+                ui.close_menu();
+            }
+            ui.separator();
+            if ui.button("Add video track").clicked() {
+                self.project.add_track(TrackKind::Video);
+                ui.close_menu();
+            }
+            if ui.button("Add audio track").clicked() {
+                self.project.add_track(TrackKind::Audio);
+                ui.close_menu();
+            }
+        }
     }
 
     fn timeline(&mut self, ui: &mut egui::Ui) {
@@ -1680,14 +1892,20 @@ impl App {
         let lane = rect.left() + HEADER_WIDTH;
         if response.hovered() {
             let (delta, modifiers, pointer) = ui.input(|i| (i.smooth_scroll_delta, i.modifiers, i.pointer.hover_pos()));
+            if !modifiers.command && !modifiers.shift && delta.y != 0.0 {
+                let content = self.project.tracks.len() as f32 * TRACK_HEIGHT + 60.0;
+                let visible = rect.height() - RULER_HEIGHT;
+                self.scroll_y = (self.scroll_y - delta.y).clamp(0.0, (content - visible).max(0.0));
+            }
             if modifiers.command && delta.y != 0.0 {
                 let anchor = pointer.map_or(0.0, |p| (p.x - lane) / self.zoom + self.scroll);
                 self.zoom = (self.zoom * (1.0 + delta.y * 0.003)).clamp(0.2, 60.0);
                 if let Some(p) = pointer {
                     self.scroll = (anchor - (p.x - lane) / self.zoom).max(0.0);
                 }
-            } else {
-                self.scroll = (self.scroll - (delta.y + delta.x) / self.zoom).max(0.0);
+            } else if delta.x != 0.0 || modifiers.shift {
+                let sideways = if delta.x != 0.0 { delta.x } else { delta.y };
+                self.scroll = (self.scroll - sideways / self.zoom).max(0.0);
             }
         }
         let zoom = if zoom != self.zoom { self.zoom } else { zoom };
@@ -1705,7 +1923,13 @@ impl App {
         }
         let order: Vec<usize> = (0..self.project.tracks.len()).rev().collect();
         let row_of = |track: usize| order.iter().position(|t| *t == track).unwrap_or(0);
-        let row_rect = |row: usize| Rect::from_min_size(Pos2::new(rect.left(), rect.top() + RULER_HEIGHT + row as f32 * TRACK_HEIGHT), Vec2::new(rect.width(), TRACK_HEIGHT - 1.0));
+        let scroll_y = self.scroll_y;
+        let row_rect = |row: usize| Rect::from_min_size(Pos2::new(rect.left(), rect.top() + RULER_HEIGHT - scroll_y + row as f32 * TRACK_HEIGHT), Vec2::new(rect.width(), TRACK_HEIGHT - 1.0));
+        self.timeline_rect = Some((rect, order.clone()));
+        let below = Rect::from_min_max(Pos2::new(rect.left(), rect.top() + RULER_HEIGHT), rect.max);
+        let full = content.clone();
+        let painter = painter.with_clip_rect(below);
+        let content = content.with_clip_rect(Rect::from_min_max(Pos2::new(lane, below.top()), rect.max));
         let pointer = response.interact_pointer_pos().or(response.hover_pos());
         let mut header_click = None;
         for (row, track) in order.iter().enumerate() {
@@ -1854,9 +2078,10 @@ impl App {
             }
             if response.dragged() {
                 if let Some((index, mode)) = self.drag {
-                    let row = ((pos.y - rect.top() - RULER_HEIGHT) / TRACK_HEIGHT).max(0.0) as usize;
+                    let row = ((pos.y - rect.top() - RULER_HEIGHT + scroll_y) / TRACK_HEIGHT).max(0.0) as usize;
                     let target = order.get(row).copied();
-                    let reach = if self.settings.snapping { (8.0 / zoom) as u32 + 1 } else { 0 };
+                    let reach = if self.settings.snapping { (10.0 / zoom) as u32 + 1 } else { 0 };
+                    let mut line = None;
                     let frames = self.project.snap(time as u32, Some(index), self.frame, reach);
                     let snap_start = self.project.clone();
                     let mut group_shift = 0i64;
@@ -1865,7 +2090,17 @@ impl App {
                             Drag::Move { grab } => {
                                 let length = clip.end - clip.start;
                                 let wanted = (time - grab).max(0.0) as u32;
-                                let start = snap_start.snap(wanted, Some(index), self.frame, reach);
+                                let by_start = snap_start.snap(wanted, Some(index), self.frame, reach);
+                                let by_end = snap_start.snap(wanted + length, Some(index), self.frame, reach);
+                                let start = if by_start != wanted && (by_end == wanted + length || by_start.abs_diff(wanted) <= by_end.abs_diff(wanted + length)) {
+                                    line = Some(by_start);
+                                    by_start
+                                } else if by_end != wanted + length {
+                                    line = Some(by_end);
+                                    by_end.saturating_sub(length)
+                                } else {
+                                    wanted
+                                };
                                 let shift = start as i64 - clip.start as i64;
                                 clip.start = start;
                                 clip.end = start + length;
@@ -1879,12 +2114,17 @@ impl App {
                             }
                             Drag::TrimStart => {
                                 let start = frames.min(clip.end - 1);
+                                line = (frames != time as u32).then_some(frames);
                                 clip.offset = (clip.offset as i64 + start as i64 - clip.start as i64).max(0) as u32;
                                 clip.start = start;
                             }
-                            Drag::TrimEnd => clip.end = frames.max(clip.start + 1),
+                            Drag::TrimEnd => {
+                                line = (frames != time as u32).then_some(frames);
+                                clip.end = frames.max(clip.start + 1);
+                            }
                         }
                     }
+                    self.snap_line = line;
                     if group_shift != 0 {
                         let lowest = self.also_selected.iter().filter_map(|other| self.project.clips.get(*other)).map(|clip| clip.start as i64).min().unwrap_or(0);
                         let shift = group_shift.max(-lowest);
@@ -1902,14 +2142,36 @@ impl App {
         }
         if response.drag_stopped() {
             self.drag = None;
+            self.snap_line = None;
+        }
+        if response.secondary_clicked() {
+            self.menu_opened = Instant::now();
+            self.menu_clip = hit.map(|(index, _)| index);
+            if self.menu_clip.is_some() {
+                self.selected = self.menu_clip;
+            }
+        }
+        response.context_menu(|ui| self.timeline_menu(ui));
+        if self.project.clips.is_empty() {
+            full.text(below.center(), egui::Align2::CENTER_CENTER, "Drag media here to start creating", egui::FontId::proportional(14.0), Color32::GRAY);
+        }
+        if let Some(frame) = self.snap_line {
+            let x = to_x(frame as f32);
+            full.line_segment([Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())], Stroke::new(1.5_f32, Color32::from_rgb(255, 225, 90)));
+        }
+        let content_height = self.project.tracks.len() as f32 * TRACK_HEIGHT + 60.0;
+        if content_height > below.height() {
+            let ratio = below.height() / content_height;
+            let top = below.top() + self.scroll_y * ratio;
+            painter.rect_filled(Rect::from_min_size(Pos2::new(rect.right() - 5.0, top), Vec2::new(4.0, below.height() * ratio)), 2.0_f32, Color32::from_gray(110));
         }
         for marker in &self.project.markers {
             let x = to_x(*marker as f32);
-            content.line_segment([Pos2::new(x, rect.top() + RULER_HEIGHT - 8.0), Pos2::new(x, rect.top() + RULER_HEIGHT)], Stroke::new(3.0_f32, Color32::from_rgb(90, 200, 120)));
+            full.line_segment([Pos2::new(x, rect.top() + RULER_HEIGHT - 8.0), Pos2::new(x, rect.top() + RULER_HEIGHT)], Stroke::new(3.0_f32, Color32::from_rgb(90, 200, 120)));
         }
         let head = to_x(self.frame as f32);
-        content.line_segment([Pos2::new(head, rect.top()), Pos2::new(head, rect.bottom())], Stroke::new(1.5_f32, accent));
-        content.circle_filled(Pos2::new(head, rect.top() + 6.0), 5.0, accent);
+        full.line_segment([Pos2::new(head, rect.top()), Pos2::new(head, rect.bottom())], Stroke::new(1.5_f32, accent));
+        full.circle_filled(Pos2::new(head, rect.top() + 6.0), 5.0, accent);
     }
 }
 
@@ -1926,7 +2188,11 @@ impl eframe::App for App {
         if let Some(mut dock) = self.dock.take() {
             let mut style = Style::from_egui(ctx.style().as_ref());
             style.tab_bar.fill_tab_bar = false;
-            DockArea::new(&mut dock).style(style).show(ctx, &mut Viewer { app: self });
+            style.separator.width = 6.0;
+            style.separator.color_idle = Color32::from_gray(self.settings.panel_gray.saturating_sub(16));
+            style.main_surface_border_stroke = Stroke::NONE;
+            DockArea::new(&mut dock).style(style).show_close_buttons(false).show_add_buttons(false).show(ctx, &mut Viewer { app: self });
+            self.finish_media_drag(ctx);
             if self.dock.is_none() {
                 self.dock = Some(dock);
             }

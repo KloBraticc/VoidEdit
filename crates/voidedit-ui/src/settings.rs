@@ -11,17 +11,30 @@ pub struct Settings {
     pub preview_quality: f32,
     pub snapping: bool,
     pub gpu_preview: bool,
+    pub system_accent: bool,
     pub caption_language: String,
     pub keys: std::collections::BTreeMap<String, String>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { accent: [58, 134, 255], panel_gray: 30, ui_scale: 1.0, preview_quality: 1.0, snapping: true, gpu_preview: false, caption_language: "auto".into(), keys: Default::default() }
+        Self { accent: [58, 134, 255], panel_gray: 34, ui_scale: 1.0, preview_quality: 1.0, snapping: true, gpu_preview: false, system_accent: true, caption_language: "auto".into(), keys: Default::default() }
     }
 }
 
 pub const ACTIONS: [(&str, &str); 18] = [("Undo (Ctrl)", "Z"), ("Save (Ctrl)", "S"), ("Split (Ctrl)", "K"), ("Copy (Ctrl)", "C"), ("Paste (Ctrl)", "V"), ("Duplicate (Ctrl)", "D"), ("Import (Ctrl)", "I"), ("Export (Ctrl)", "M"), ("Play or pause", "Space"), ("Selection tool", "V"), ("Razor tool", "C"), ("Marker", "M"), ("New text", "T"), ("Previous frame", "ArrowLeft"), ("Next frame", "ArrowRight"), ("Previous edit", "ArrowUp"), ("Next edit", "ArrowDown"), ("Go to start", "Home")];
+
+#[cfg(windows)]
+pub fn system_accent() -> Option<[u8; 3]> {
+    let key = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER).open_subkey("SOFTWARE\\Microsoft\\Windows\\DWM").ok()?;
+    let value: u32 = key.get_value("AccentColor").ok()?;
+    Some([value as u8, (value >> 8) as u8, (value >> 16) as u8])
+}
+
+#[cfg(not(windows))]
+pub fn system_accent() -> Option<[u8; 3]> {
+    None
+}
 
 impl Settings {
     pub fn key(&self, action: &str) -> Option<eframe::egui::Key> {
