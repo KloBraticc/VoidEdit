@@ -40,7 +40,7 @@ pub struct MotionBlur {
 
 impl Default for MotionBlur {
     fn default() -> Self {
-        Self { enabled: false, samples: 8, shutter: 0.5 }
+        Self { enabled: false, samples: 8, shutter: 1.0 }
     }
 }
 
@@ -520,8 +520,12 @@ impl Clip {
     }
 
     pub fn media_seconds(&self, frame: u32, fps: u32) -> f64 {
+        self.media_seconds_at(frame as f32, fps)
+    }
+
+    pub fn media_seconds_at(&self, time: f32, fps: u32) -> f64 {
         let length = self.end.saturating_sub(self.start) as f64;
-        let elapsed = frame.saturating_sub(self.start) as f64;
+        let elapsed = (time as f64 - self.start as f64).max(0.0);
         let position = if self.reverse { (length - 1.0 - elapsed).max(0.0) } else { elapsed };
         (position * self.speed.max(0.01) as f64 + self.offset as f64) / fps.max(1) as f64
     }
@@ -628,6 +632,37 @@ impl Project {
         outer.track = track;
         outer.nested = Some(Box::new(inner));
         self.clips.push(outer);
+    }
+
+    pub fn shutter_times(&self, frame: u32, preview: bool) -> Vec<f32> {
+        let blur = &self.motion_blur;
+        if !blur.enabled || blur.shutter <= 0.0 {
+            return vec![frame as f32];
+        }
+        let samples = if preview { blur.samples.clamp(2, 4) } else { blur.samples.clamp(2, 64) };
+        (0..samples).map(|sample| frame as f32 + sample as f32 / samples as f32 * blur.shutter.min(2.0)).collect()
+    }
+
+    pub fn wanted_media_at(&self, frame: u32, time: f32, depth: u32, found: &mut Vec<(String, f64)>) {
+        if depth > MAX_NESTING {
+            return;
+        }
+        for clip in &self.clips {
+            if !clip.visible || frame < clip.start || frame >= clip.end || self.tracks.get(clip.track).is_some_and(|track| track.kind != TrackKind::Video) {
+                continue;
+            }
+            if let Some(path) = &clip.media {
+                found.push((path.clone(), clip.media_seconds_at(time, self.fps)));
+            } else if clip.nested.is_some() {
+                self.wanted_media_nested(clip, frame, depth, found);
+            }
+        }
+    }
+
+    fn wanted_media_nested(&self, clip: &Clip, frame: u32, depth: u32, found: &mut Vec<(String, f64)>) {
+        if let Some(inner) = &clip.nested {
+            inner.wanted_media(frame - clip.start + clip.offset, depth + 1, found);
+        }
     }
 
     pub fn wanted_media(&self, frame: u32, depth: u32, found: &mut Vec<(String, f64)>) {

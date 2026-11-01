@@ -5219,6 +5219,7 @@ dependencies = [
  "filmcraft-h264enc",
  "filmcraft-isobmff",
  "image",
+ "rayon",
  "voidedit-core",
  "voidedit-media",
  "voidedit-render",

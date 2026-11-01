@@ -187,7 +187,7 @@ fn scan(folder: &Path, depth: u32, found: &mut Vec<PathBuf>) {
     }
 }
 
-fn reveal(path: &str) {
+pub(crate) fn reveal(path: &str) {
     #[cfg(windows)]
     let _ = std::process::Command::new("explorer").arg(format!("/select,{path}")).spawn();
     #[cfg(target_os = "macos")]

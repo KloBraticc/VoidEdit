@@ -12,7 +12,7 @@ use std::time::Instant;
 use eframe::egui::{self, Color32, Pos2, Rect, RichText, Sense, Stroke, Vec2};
 use settings::Settings;
 use voidedit_core::{AnimKind, Animation, Curve, Trigger, timecode, Clip, Ease, Effect, History, MaskShape, Param, Project, Shape, TrackKind, BLENDS, EFFECT_NAMES, LOOKS, TRANSITIONS};
-use voidedit_export::{audio_clips, export_with, ExportFormat, ExportOptions, Progress};
+use voidedit_export::{audio_clips, export_with, ExportFormat, ExportOptions, ExportRate, ExportSpeed, Progress};
 use voidedit_media::{decode_now, mono_samples, track_point, waveform, Audio, FrameWant, Frames, Library};
 use voidedit_render::{render, Frame};
 
@@ -922,8 +922,12 @@ impl App {
         let progress = Arc::new(Progress::default());
         let result = Arc::new(Mutex::new(None));
         let (project, library, shared, finished, repaint) = (self.project.clone(), self.library.clone(), progress.clone(), result.clone(), self.context.clone());
+        let revealed = path.to_string_lossy().into_owned();
         let spawned = std::thread::Builder::new().name("export".into()).spawn(move || {
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| export_with(&project, &library, &path, options, &shared))).unwrap_or_else(|_| Err("the export stopped unexpectedly".into()));
+            if options.open_folder && matches!(&outcome, Ok(Ok(_))) {
+                home::reveal(&revealed);
+            }
             if let Ok(mut slot) = finished.lock() {
                 *slot = Some(outcome);
             }
@@ -1394,31 +1398,115 @@ impl App {
         self.show_mixer = show_mixer;
         let mut go = false;
         let mut show_export = self.show_export;
-        egui::Window::new("Export").open(&mut show_export).collapsible(false).resizable(false).show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                for (label, format) in [("MP4 video", ExportFormat::Mp4), ("PNG images", ExportFormat::PngSequence), ("WAV audio", ExportFormat::Wav)] {
-                    ui.selectable_value(&mut self.options.format, format, label);
-                }
-            });
-            if self.options.format != ExportFormat::Wav {
-                ui.add(egui::Slider::new(&mut self.options.scale, 0.1..=1.0).text("Resolution"));
-                let (width, height) = (self.project.width as f32 * self.options.scale, self.project.height as f32 * self.options.scale);
-                let factor = if self.options.format == ExportFormat::Mp4 { self.options.upscale.max(1) } else { 1 };
-                ui.label(RichText::new(format!("{} x {}", (width as u32 * factor) & !1, (height as u32 * factor) & !1)).weak());
-            }
-            if self.options.format == ExportFormat::Mp4 {
+        egui::Window::new("Export").open(&mut show_export).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
+            ui.set_width(480.0);
+            let accent = self.accent();
+            ui.spacing_mut().slider_width = 170.0;
+            egui::ScrollArea::vertical().max_height(ctx.content_rect().height() * 0.72).show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label("Upscale");
-                    for factor in 1..=4u32 {
-                        ui.selectable_value(&mut self.options.upscale, factor, format!("{factor}x"));
+                    if let Some(format) = widgets::segment(ui, &[(ExportFormat::Mp4, ph::FILM_STRIP, "MP4 video"), (ExportFormat::PngSequence, ph::IMAGES, "PNG images"), (ExportFormat::Wav, ph::MUSIC_NOTES, "WAV audio")], self.options.format, accent) {
+                        self.options.format = format;
                     }
                 });
-                if self.options.upscale > 1 {
-                    ui.add(egui::Slider::new(&mut self.options.sharpen, 0.0..=1.5).text("Sharpen"));
+                if self.options.format != ExportFormat::Wav {
+                    widgets::section(ui, "Picture", |ui| {
+                        widgets::setting(ui, "Resolution", |ui| {
+                            for (label, value) in [("100%", 1.0), ("75%", 0.75), ("50%", 0.5), ("25%", 0.25)] {
+                                ui.selectable_value(&mut self.options.scale, value, label);
+                            }
+                        });
+                        if self.options.format == ExportFormat::Mp4 {
+                            widgets::setting(ui, "Upscale", |ui| {
+                                for factor in (1..=4u32).rev() {
+                                    ui.selectable_value(&mut self.options.upscale, factor, format!("{factor}x"));
+                                }
+                            });
+                            if self.options.upscale > 1 {
+                                widgets::setting(ui, "Sharpen", |ui| {
+                                    ui.add(egui::Slider::new(&mut self.options.sharpen, 0.0..=1.5));
+                                });
+                            }
+                        }
+                        let factor = if self.options.format == ExportFormat::Mp4 { self.options.upscale.max(1) } else { 1 };
+                        let (width, height) = (self.project.width as f32 * self.options.scale, self.project.height as f32 * self.options.scale);
+                        widgets::setting(ui, "Output size", |ui| {
+                            ui.label(RichText::new(format!("{} x {}, {} fps", (width as u32 * factor) & !1, (height as u32 * factor) & !1, self.project.fps)).weak());
+                        });
+                        widgets::setting(ui, "Motion blur", |ui| {
+                            ui.checkbox(&mut self.project.motion_blur.enabled, "");
+                        });
+                    });
                 }
-                ui.add(egui::Slider::new(&mut self.options.quality, 40.0..=10.0).text("Quality"));
-            }
-            go = ui.button("Export").clicked();
+                if self.options.format == ExportFormat::Mp4 {
+                    widgets::section(ui, "H.264 encoding", |ui| {
+                        widgets::setting(ui, "Speed", |ui| {
+                            for (label, value) in [("Best compression", ExportSpeed::Best), ("Balanced", ExportSpeed::Balanced), ("Fastest", ExportSpeed::Fastest)] {
+                                ui.selectable_value(&mut self.options.speed, value, label);
+                            }
+                        });
+                        widgets::setting(ui, "Rate control", |ui| {
+                            for (label, value) in [("Variable bitrate", ExportRate::Variable), ("Constant bitrate", ExportRate::Constant), ("Quality", ExportRate::Quality)] {
+                                ui.selectable_value(&mut self.options.rate, value, label);
+                            }
+                        });
+                        if self.options.rate == ExportRate::Quality {
+                            widgets::setting(ui, "Quality (lower is better)", |ui| {
+                                ui.add(egui::Slider::new(&mut self.options.quality, 10.0..=40.0));
+                            });
+                        } else {
+                            widgets::setting(ui, "Bitrate (kbps)", |ui| {
+                                ui.add(egui::DragValue::new(&mut self.options.bitrate).range(500..=200_000).speed(100));
+                            });
+                        }
+                        widgets::setting(ui, "Keyframe every (frames)", |ui| {
+                            ui.add(egui::DragValue::new(&mut self.options.keyframes).range(1..=1000));
+                        });
+                        widgets::setting(ui, "Main profile for old devices", |ui| {
+                            ui.checkbox(&mut self.options.main_profile, "");
+                        });
+                    });
+                    widgets::section(ui, "Audio", |ui| {
+                        widgets::setting(ui, "Include audio", |ui| {
+                            ui.checkbox(&mut self.options.audio, "");
+                        });
+                        if self.options.audio {
+                            widgets::setting(ui, "AAC bitrate", |ui| {
+                                for kbps in [320u32, 256, 192, 128] {
+                                    ui.selectable_value(&mut self.options.audio_kbps, kbps, format!("{kbps}"));
+                                }
+                            });
+                        }
+                    });
+                    widgets::section(ui, "Range", |ui| {
+                        let end = self.project.end_frame().max(1);
+                        widgets::setting(ui, "Export only part", |ui| {
+                            let mut part = self.options.last_frame != 0;
+                            if ui.checkbox(&mut part, "").changed() {
+                                self.options.first_frame = 0;
+                                self.options.last_frame = if part { end } else { 0 };
+                            }
+                        });
+                        if self.options.last_frame != 0 {
+                            widgets::setting(ui, "From and to frame", |ui| {
+                                ui.add(egui::DragValue::new(&mut self.options.last_frame).range(1..=end));
+                                ui.add(egui::DragValue::new(&mut self.options.first_frame).range(0..=end - 1));
+                                if ui.button("From playhead").clicked() {
+                                    self.options.first_frame = self.frame.min(end - 1);
+                                }
+                            });
+                        }
+                    });
+                }
+                widgets::section(ui, "After export", |ui| {
+                    widgets::setting(ui, "Show the file in its folder", |ui| {
+                        ui.checkbox(&mut self.options.open_folder, "");
+                    });
+                });
+                ui.add_space(10.0);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    go = widgets::accent_button(ui, "Export", accent).clicked();
+                });
+            });
         });
         self.show_export = show_export;
         if go {
@@ -2300,7 +2388,11 @@ impl App {
         let scale = (size.x * pixels / self.project.width as f32 * self.settings.preview_quality).clamp(0.05, 1.0).min(MAX_TEXTURE_SIDE as f32 / largest);
         let time = self.frame;
         let mut found = Vec::new();
-        self.project.wanted_media(time, 0, &mut found);
+        for moment in self.project.shutter_times(time, true) {
+            self.project.wanted_media_at(time, moment, 0, &mut found);
+        }
+        found.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
+        found.dedup();
         self.frames.want(found.into_iter().map(|(path, seconds)| FrameWant { path, seconds, scale }).collect());
         let generation = self.frames.generation();
         let stale = self.rendered.as_ref().is_none_or(|(frame, project, s, g)| *frame != self.frame || *s != scale || *g != generation || *project != self.project);
@@ -2536,9 +2628,9 @@ impl App {
                 let blur = self.project.motion_blur.enabled;
                 ui.menu_button(format!("{}  Motion blur{}", ph::WIND, if blur { " on" } else { "" }), |ui| {
                     ui.checkbox(&mut self.project.motion_blur.enabled, "Enable motion blur");
-                    ui.add(egui::Slider::new(&mut self.project.motion_blur.shutter, 0.05..=1.0).text("Shutter"));
+                    ui.add(egui::Slider::new(&mut self.project.motion_blur.shutter, 0.05..=2.0).text("Shutter"));
                     ui.add(egui::Slider::new(&mut self.project.motion_blur.samples, 2..=32).text("Export samples"));
-                    ui.label(RichText::new("The preview uses up to 4 samples, exports use all of them").small().weak());
+                    ui.label(RichText::new("Footage blends neighbouring frames, so use a shutter near 1. The preview uses up to 4 samples, exports use all").small().weak());
                 });
                 let snapping = self.settings.snapping;
                 if widgets::pill(ui, ph::MAGNET, "Snap", snapping, accent).on_hover_text("Clips snap to each other, the playhead and markers").clicked() {

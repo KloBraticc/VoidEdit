@@ -1,3 +1,4 @@
+use rayon::prelude::*;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufWriter;
@@ -75,14 +76,14 @@ fn to_yuv(frame: &Frame, width: usize, height: usize, y: &mut [u8], u: &mut [u8]
         let start = (row * frame.width + column) * 4;
         (frame.pixels[start] as i32, frame.pixels[start + 1] as i32, frame.pixels[start + 2] as i32)
     };
-    for row in 0..height {
-        for column in 0..width {
+    y.par_chunks_mut(width).enumerate().take(height).for_each(|(row, line)| {
+        for (column, out) in line.iter_mut().enumerate() {
             let (r, g, b) = at(column, row);
-            y[row * width + column] = (((47 * r + 157 * g + 16 * b + 128) >> 8) + 16) as u8;
+            *out = (((47 * r + 157 * g + 16 * b + 128) >> 8) + 16) as u8;
         }
-    }
+    });
     let half = width / 2;
-    for row in 0..height / 2 {
+    u.par_chunks_mut(half).zip(v.par_chunks_mut(half)).enumerate().take(height / 2).for_each(|(row, (line_u, line_v))| {
         for column in 0..half {
             let (mut r, mut g, mut b) = (0, 0, 0);
             for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
@@ -92,10 +93,10 @@ fn to_yuv(frame: &Frame, width: usize, height: usize, y: &mut [u8], u: &mut [u8]
                 b += pixel.2;
             }
             let (r, g, b) = (r / 4, g / 4, b / 4);
-            u[row * half + column] = (((-26 * r - 87 * g + 112 * b + 128) >> 8) + 128) as u8;
-            v[row * half + column] = (((112 * r - 102 * g - 10 * b + 128) >> 8) + 128) as u8;
+            line_u[column] = (((-26 * r - 87 * g + 112 * b + 128) >> 8) + 128) as u8;
+            line_v[column] = (((112 * r - 102 * g - 10 * b + 128) >> 8) + 128) as u8;
         }
-    }
+    });
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -105,6 +106,30 @@ pub struct ExportOptions {
     pub format: ExportFormat,
     pub upscale: u32,
     pub sharpen: f32,
+    pub speed: ExportSpeed,
+    pub rate: ExportRate,
+    pub bitrate: u32,
+    pub keyframes: u32,
+    pub main_profile: bool,
+    pub audio: bool,
+    pub audio_kbps: u32,
+    pub first_frame: u32,
+    pub last_frame: u32,
+    pub open_folder: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ExportSpeed {
+    Fastest,
+    Balanced,
+    Best,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ExportRate {
+    Quality,
+    Constant,
+    Variable,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -116,7 +141,7 @@ pub enum ExportFormat {
 
 impl Default for ExportOptions {
     fn default() -> Self {
-        Self { scale: 1.0, quality: 20.0, format: ExportFormat::Mp4, upscale: 1, sharpen: 0.4 }
+        Self { scale: 1.0, quality: 20.0, format: ExportFormat::Mp4, upscale: 1, sharpen: 0.4, speed: ExportSpeed::Fastest, rate: ExportRate::Quality, bitrate: 12_000, keyframes: 120, main_profile: false, audio: true, audio_kbps: 192, first_frame: 0, last_frame: 0, open_folder: true }
     }
 }
 
@@ -167,7 +192,7 @@ fn write_png_sequence(project: &Project, library: &Library, folder: &Path, scale
         if progress.cancel.load(Ordering::Relaxed) {
             return Err("cancelled".into());
         }
-        let images = gather(project, library, index);
+        let images = gather(project, library, index, scale);
         render(project, index, scale, &mut frame, &|name| images.get(name).cloned());
         let path = folder.join(format!("frame_{index:06}.png"));
         image::save_buffer(&path, &frame.pixels, frame.width as u32, frame.height as u32, image::ColorType::Rgba8).map_err(|e| e.to_string())?;
@@ -176,10 +201,15 @@ fn write_png_sequence(project: &Project, library: &Library, folder: &Path, scale
     Ok(())
 }
 
-fn gather(project: &Project, library: &Library, index: u32) -> HashMap<String, Arc<Image>> {
+fn gather(project: &Project, library: &Library, index: u32, scale: f32) -> HashMap<String, Arc<Image>> {
     let mut images = HashMap::new();
     let mut found = Vec::new();
     project.wanted_media(index, 0, &mut found);
+    for time in project.shutter_times(index, scale < 1.0) {
+        project.wanted_media_at(index, time, 0, &mut found);
+    }
+    found.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
+    found.dedup();
     for (path, seconds) in found {
         let key = voidedit_core::media_key(&path, seconds);
         if let Some(image) = decode_now(library, &FrameWant { path, seconds, scale: 1.0 }) {
@@ -201,6 +231,8 @@ pub fn export(project: &Project, library: &Library, path: &Path, progress: &Arc<
     write_mp4(project, library, path, ExportOptions::default(), progress)
 }
 
+const RENDER_AHEAD: usize = 8;
+
 fn write_mp4(project: &Project, library: &Library, path: &Path, options: ExportOptions, progress: &Arc<Progress>) -> Result<(), String> {
     let scale = options.scale.clamp(0.1, 1.0);
     let factor = options.upscale.clamp(1, 4) as usize;
@@ -209,59 +241,106 @@ fn write_mp4(project: &Project, library: &Library, path: &Path, options: ExportO
     let width = width.max(2);
     let height = height.max(2);
     let fps = project.fps.max(1);
-    let total = project.end_frame().max(1);
+    let project_end = project.end_frame().max(1);
+    let last = if options.last_frame == 0 { project_end } else { options.last_frame.min(project_end) };
+    let first = options.first_frame.min(last.saturating_sub(1));
+    let total = last - first;
     progress.total.store(total, Ordering::Relaxed);
     let mut config = EncoderConfig::new(width as u32, height as u32, fps, 1);
     config.format = PacketFormat::LengthPrefixed;
     config.bframes = 0;
-    config.rate = RateControl::Crf(options.quality.clamp(10.0, 40.0));
+    config.rate = match options.rate {
+        ExportRate::Quality => RateControl::Crf(options.quality.clamp(10.0, 40.0)),
+        ExportRate::Constant => RateControl::Cbr { kbps: options.bitrate.max(100) },
+        ExportRate::Variable => RateControl::Vbr { target_kbps: options.bitrate.max(100), max_kbps: options.bitrate.max(100) * 2 },
+    };
+    config.preset = match options.speed {
+        ExportSpeed::Fastest => filmcraft_h264enc::Preset::Speed,
+        ExportSpeed::Balanced => filmcraft_h264enc::Preset::Balanced,
+        ExportSpeed::Best => filmcraft_h264enc::Preset::Quality,
+    };
+    config.threads = 0;
+    config.slices = if options.speed == ExportSpeed::Fastest { std::thread::available_parallelism().map_or(4, |count| count.get()).min(16) } else { 0 };
+    config.keyint = options.keyframes.max(1);
+    if options.main_profile {
+        config.profile = filmcraft_h264enc::Profile::Main;
+    }
     let mut encoder = Encoder::new(config).map_err(|error| format!("{error:?}"))?;
     let file = BufWriter::new(File::create(path).map_err(|error| error.to_string())?);
     let mut writer = Mp4Writer::new(file, WriterOptions::new(Brand::Mp4)).map_err(|error| error.to_string())?;
     let avc = AvcConfig::parse(&encoder.avcc()).map_err(|error| format!("{error:?}"))?;
     let video = writer.add_track(TrackConfig::new(SampleEntry::avc(avc, width as u16, height as u16), fps)).map_err(|error| error.to_string())?;
     let clips = audio_clips(project);
-    let mut audio = if clips.is_empty() {
+    let mut audio = if clips.is_empty() || !options.audio {
         None
     } else {
-        let aac = filmcraft_aac::Encoder::new(filmcraft_aac::EncoderConfig::cbr(AUDIO_RATE, 2, 192_000)).map_err(|error| format!("{error:?}"))?;
+        let aac = filmcraft_aac::Encoder::new(filmcraft_aac::EncoderConfig::cbr(AUDIO_RATE, 2, options.audio_kbps.clamp(64, 320) * 1000)).map_err(|error| format!("{error:?}"))?;
         let entry = SampleEntry::aac(aac.audio_specific_config(), 2, AUDIO_RATE);
         let track = writer.add_track(TrackConfig::new(entry, AUDIO_RATE)).map_err(|error| error.to_string())?;
         Some((aac, track))
     };
-    let mut frame = Frame::default();
-    let mut enlarged = Frame::default();
-    let (mut y, mut u, mut v) = (vec![0; width * height], vec![0; width * height / 4], vec![0; width * height / 4]);
-    let mut audio_position = 0i64;
+    let mut audio_position = first as i64 * AUDIO_RATE as i64 / fps as i64;
     let mut mixer = Mixer::default();
-    for index in 0..total {
-        if progress.cancel.load(Ordering::Relaxed) {
-            return Err("cancelled".into());
-        }
-        let images = gather(project, library, index);
-        render(project, index, scale, &mut frame, &|name| images.get(name).cloned());
-        if factor > 1 {
-            upscale(&frame, width, height, options.sharpen, &mut enlarged);
-            to_yuv(&enlarged, width, height, &mut y, &mut u, &mut v);
-        } else {
-            to_yuv(&frame, width, height, &mut y, &mut u, &mut v);
-        }
-        let input = filmcraft_h264enc::YuvFrame { y: &y, u: &u, v: &v, y_stride: width, uv_stride: width / 2 };
-        for packet in encoder.encode(&input, index as i64).map_err(|error| format!("{error:?}"))? {
-            write_video(&mut writer, video, &packet)?;
-        }
-        if let Some((aac, track)) = &mut audio {
-            let until = (index as i64 + 1) * AUDIO_RATE as i64 / fps as i64;
-            let frames = (until - audio_position) as usize;
-            let mixed = mixer.mix(library, &clips, &project.master_fx, audio_position, frames, AUDIO_RATE);
-            audio_position = until;
-            let left: Vec<f32> = mixed.iter().step_by(2).copied().collect();
-            let right: Vec<f32> = mixed.iter().skip(1).step_by(2).copied().collect();
-            for unit in aac.encode(&[&left, &right]) {
-                write_audio(&mut writer, *track, &unit)?;
+    std::thread::scope(|scope| -> Result<(), String> {
+        let (sender, receiver) = std::sync::mpsc::sync_channel::<(Vec<u8>, Vec<u8>, Vec<u8>)>(RENDER_AHEAD);
+        let worker_progress = progress.clone();
+        scope.spawn(move || {
+            let batch_size = std::thread::available_parallelism().map_or(4, |count| count.get()).clamp(2, RENDER_AHEAD);
+            let mut next = first;
+            while next < last {
+                if worker_progress.cancel.load(Ordering::Relaxed) {
+                    return;
+                }
+                let batch: Vec<(u32, HashMap<String, Arc<Image>>)> = (next..(next + batch_size as u32).min(last)).map(|index| (index, gather(project, library, index, scale))).collect();
+                next += batch.len() as u32;
+                let finished: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)> = batch
+                    .par_iter()
+                    .map(|(index, images)| {
+                        let mut frame = Frame::default();
+                        render(project, *index, scale, &mut frame, &|name| images.get(name).cloned());
+                        let (mut y, mut u, mut v) = (vec![0; width * height], vec![0; width * height / 4], vec![0; width * height / 4]);
+                        if factor > 1 {
+                            let mut enlarged = Frame::default();
+                            upscale(&frame, width, height, options.sharpen, &mut enlarged);
+                            to_yuv(&enlarged, width, height, &mut y, &mut u, &mut v);
+                        } else {
+                            to_yuv(&frame, width, height, &mut y, &mut u, &mut v);
+                        }
+                        (y, u, v)
+                    })
+                    .collect();
+                for planes in finished {
+                    if sender.send(planes).is_err() {
+                        return;
+                    }
+                }
             }
+        });
+        for (position, (y, u, v)) in receiver.iter().enumerate() {
+            if progress.cancel.load(Ordering::Relaxed) {
+                return Err("cancelled".into());
+            }
+            let input = filmcraft_h264enc::YuvFrame { y: &y, u: &u, v: &v, y_stride: width, uv_stride: width / 2 };
+            for packet in encoder.encode(&input, position as i64).map_err(|error| format!("{error:?}"))? {
+                write_video(&mut writer, video, &packet)?;
+            }
+            if let Some((aac, track)) = &mut audio {
+                let until = (first as i64 + position as i64 + 1) * AUDIO_RATE as i64 / fps as i64;
+                let frames = (until - audio_position) as usize;
+                let mixed = mixer.mix(library, &clips, &project.master_fx, audio_position, frames, AUDIO_RATE);
+                audio_position = until;
+                let left: Vec<f32> = mixed.iter().step_by(2).copied().collect();
+                let right: Vec<f32> = mixed.iter().skip(1).step_by(2).copied().collect();
+                for unit in aac.encode(&[&left, &right]) {
+                    write_audio(&mut writer, *track, &unit)?;
+                }
+            }
+            progress.done.store(position as u32 + 1, Ordering::Relaxed);
         }
-        progress.done.store(index + 1, Ordering::Relaxed);
+        Ok(())
+    })?;
+    if progress.cancel.load(Ordering::Relaxed) {
+        return Err("cancelled".into());
     }
     for packet in encoder.flush() {
         write_video(&mut writer, video, &packet)?;

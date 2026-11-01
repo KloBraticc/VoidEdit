@@ -979,16 +979,14 @@ pub fn wanted_frame(project: &Project, clip: &Clip, frame: u32) -> bool {
 }
 
 pub fn render(project: &Project, frame: u32, scale: f32, target: &mut Frame, images: &dyn Fn(&str) -> Option<Arc<Image>>) {
-    let blur = &project.motion_blur;
-    let moving = project.clips.iter().any(|clip| !clip.animations.is_empty() || !clip.x.keys.is_empty() || !clip.y.keys.is_empty() || !clip.scale.keys.is_empty() || !clip.rotation.keys.is_empty());
-    if !blur.enabled || !moving || blur.shutter <= 0.0 {
+    let times = project.shutter_times(frame, scale < 1.0);
+    if times.len() < 2 {
         render_at(project, frame, frame as f32, scale, target, images);
         return;
     }
-    let samples = if scale < 1.0 { blur.samples.clamp(2, 4) } else { blur.samples.clamp(2, 32) };
+    let samples = times.len() as u32;
     let mut total: Vec<u32> = Vec::new();
-    for sample in 0..samples {
-        let time = frame as f32 + sample as f32 / samples as f32 * blur.shutter.min(1.0);
+    for time in times {
         render_at(project, frame, time, scale, target, images);
         total.resize(target.pixels.len(), 0);
         for (sum, value) in total.iter_mut().zip(&target.pixels) {
@@ -1100,7 +1098,7 @@ fn layers_at(project: &Project, frame: u32, time: f32, scale: f32, images: &dyn 
                     Some(Arc::new(styled_text_image(&visible, clip.text_size, clip.color, clip.text_stroke, clip.text_background, &clip.text_style, seconds)?))
                 }
                 (Some(text), _) => Some(Arc::new(styled_text_image(text, clip.text_size, clip.color, clip.text_stroke, clip.text_background, &clip.text_style, seconds)?)),
-                (None, Some(path)) => Some(images(&voidedit_core::media_key(path, clip.media_seconds(frame, project.fps)))?),
+                (None, Some(path)) => Some(images(&voidedit_core::media_key(path, clip.media_seconds_at(time, project.fps)))?),
                 (None, None) => None,
             };
             let main = resolve(clip, time, scale, image)?;

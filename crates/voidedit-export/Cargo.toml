@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+rayon.workspace = true
 voidedit-core.workspace = true
 voidedit-render.workspace = true
 voidedit-media.workspace = true
