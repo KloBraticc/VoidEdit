@@ -29,7 +29,7 @@ pub struct Theme {
 
 impl Theme {
     fn preset(name: &str, background: [u8; 3], card: [u8; 3], text: [u8; 3]) -> Self {
-        Self { name: name.into(), background, card, text, card_opacity: 235, radius: 14.0 }
+        Self { name: name.into(), background, card, text, card_opacity: 255, radius: 2.0 }
     }
 
     pub fn presets() -> Vec<Theme> {
@@ -71,7 +71,7 @@ impl Theme {
 
 impl Default for Theme {
     fn default() -> Self {
-        Self::preset("Void", [12, 12, 16], [24, 24, 31], [232, 232, 238])
+        Self::preset("Studio", [24, 24, 28], [40, 40, 46], [200, 200, 205])
     }
 }
 
@@ -95,7 +95,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { accent: [58, 134, 255], theme: Theme::default(), backdrop: Backdrop::None, wallpaper: String::new(), wallpaper_dim: 0.45, animations: true, ui_scale: 1.0, preview_quality: 1.0, snapping: true, gpu_preview: false, system_accent: true, caption_language: "auto".into(), keys: Default::default() }
+        Self { accent: [230, 60, 50], theme: Theme::default(), backdrop: Backdrop::None, wallpaper: String::new(), wallpaper_dim: 0.45, animations: true, ui_scale: 1.0, preview_quality: 1.0, snapping: true, gpu_preview: false, system_accent: false, caption_language: "auto".into(), keys: Default::default() }
     }
 }
 

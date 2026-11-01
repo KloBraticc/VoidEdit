@@ -14,7 +14,27 @@ fn icon() -> eframe::egui::IconData {
     }
 }
 
-fn run(renderer: eframe::Renderer, project: Option<std::ffi::OsString>) -> eframe::Result {
+struct Software(voidedit_ui::App);
+
+impl egui_software_backend::App for Software {
+    fn ui(&mut self, ui: &mut eframe::egui::Ui, _backend: &mut egui_software_backend::SoftwareBackend) {
+        self.0.show(ui);
+    }
+}
+
+fn viewport(transparent: bool) -> eframe::egui::ViewportBuilder {
+    eframe::egui::ViewportBuilder::default().with_title("Void Edit").with_transparent(transparent).with_inner_size([1500.0, 950.0]).with_min_inner_size([900.0, 600.0]).with_icon(icon())
+}
+
+fn build_app(context: &eframe::egui::Context, status: Arc<Mutex<String>>, project: &Option<std::ffi::OsString>) -> voidedit_ui::App {
+    let mut app = voidedit_ui::App::new(context, status);
+    if let Some(path) = project {
+        app.open_path(path.into());
+    }
+    app
+}
+
+fn run(accelerated: bool, project: Option<std::ffi::OsString>) -> bool {
     let status = Arc::new(Mutex::new(String::new()));
     let updates = status.clone();
     let _ = std::thread::Builder::new().name("update".into()).spawn(move || {
@@ -24,35 +44,23 @@ fn run(renderer: eframe::Renderer, project: Option<std::ffi::OsString>) -> efram
             }
         }
     });
-    let options = eframe::NativeOptions {
-        renderer,
-        viewport: eframe::egui::ViewportBuilder::default().with_title("Void Edit").with_transparent(true).with_inner_size([1500.0, 950.0]).with_min_inner_size([900.0, 600.0]).with_icon(icon()),
-        ..Default::default()
-    };
-    eframe::run_native(
-        "Void Edit",
-        options,
-        Box::new(move |context| {
-            let mut app = voidedit_ui::App::new(&context.egui_ctx, status);
-            if let Some(state) = context.wgpu_render_state.clone() {
-                app.use_gpu(state);
-            }
-            if let Some(path) = project {
-                app.open_path(path.into());
-            }
-            Ok(Box::new(app))
-        }),
-    )
+    if accelerated {
+        let options = eframe::NativeOptions { renderer: eframe::Renderer::Glow, viewport: viewport(true), ..Default::default() };
+        return eframe::run_native("Void Edit", options, Box::new(move |context| Ok(Box::new(build_app(&context.egui_ctx, status, &project))))).is_ok();
+    }
+    let mut settings = egui_software_backend::SoftwareBackendAppConfiguration::new();
+    settings.viewport_builder = viewport(false);
+    settings.allow_raster_opt = false;
+    egui_software_backend::run_app_with_software_backend(settings, move |context| Software(build_app(&context, status.clone(), &project))).is_ok()
 }
 
 fn main() {
     let arguments: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     let is_fallback = arguments.iter().any(|argument| argument == FALLBACK_ARGUMENT);
     let project = arguments.iter().find(|argument| *argument != FALLBACK_ARGUMENT).cloned();
-    let prefers_gpu = voidedit_ui::prefers_gpu_preview();
-    let renderer = if prefers_gpu != is_fallback { eframe::Renderer::Wgpu } else { eframe::Renderer::Glow };
+    let accelerated = voidedit_ui::wants_backdrop() != is_fallback;
     let attempt = project.clone();
-    let failed = !matches!(std::panic::catch_unwind(move || run(renderer, attempt)), Ok(Ok(())));
+    let failed = !matches!(std::panic::catch_unwind(move || run(accelerated, attempt)), Ok(true));
     if failed && !is_fallback {
         if let Ok(executable) = std::env::current_exe() {
             let mut command = std::process::Command::new(executable);

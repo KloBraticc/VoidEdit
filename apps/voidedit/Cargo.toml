@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+egui_software_backend = "0.0.3"
 voidedit-ui.workspace = true
 voidedit-update = { path = "../../crates/voidedit-update" }
 eframe.workspace = true

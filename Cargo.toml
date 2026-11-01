@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/voidedit-core", "crates/voidedit-render", "crates/voidedit-ui", "crates/voidedit-media", "crates/voidedit-export", "crates/voidedit-gpu", "crates/voidedit-fx", "crates/voidedit-speech", "crates/voidedit-update", "apps/voidedit"]
+members = ["crates/voidedit-core", "crates/voidedit-render", "crates/voidedit-ui", "crates/voidedit-media", "crates/voidedit-export", "crates/voidedit-fx", "crates/voidedit-speech", "crates/voidedit-update", "apps/voidedit"]
 
 [workspace.package]
 version = "1.0.0"
@@ -13,13 +13,12 @@ voidedit-core = { path = "crates/voidedit-core" }
 voidedit-render = { path = "crates/voidedit-render" }
 voidedit-media = { path = "crates/voidedit-media" }
 voidedit-export = { path = "crates/voidedit-export" }
-voidedit-gpu = { path = "crates/voidedit-gpu" }
 voidedit-fx = { path = "crates/voidedit-fx" }
 voidedit-ui = { path = "crates/voidedit-ui" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rayon = "1"
-eframe = { version = "0.31", default-features = false, features = ["default_fonts", "wgpu", "glow", "x11", "wayland"] }
+eframe = { version = "0.34", default-features = false, features = ["default_fonts", "glow", "x11", "wayland"] }
 rfd = "0.15"
 
 [profile.release]
