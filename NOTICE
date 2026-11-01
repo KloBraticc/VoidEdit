@@ -1,0 +1,10 @@
+Void Edit
+
+Copyright (c) 2026 KloBratic. Licensed under the MIT License (LICENSE-MIT).
+
+This software uses these libraries, under the MIT License:
+- FilmCraft decoders and encoders: https://github.com/storytold/filmcraft
+- EffectCraft effects: https://github.com/storytold/effectcraft
+  Copyright (c) 2026 ArtCraft Team and contributors.
+- Inter font, SIL Open Font License 1.1: assets/OFL-Inter.txt
+- Whisper tiny speech model, downloaded on first use, MIT License: https://huggingface.co/openai/whisper-tiny
