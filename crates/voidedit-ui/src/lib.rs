@@ -104,6 +104,11 @@ pub struct App {
     show_strip: bool,
     show_inspector: bool,
     bin: usize,
+    show_studio: bool,
+    studio_tab: usize,
+    studio_search: String,
+    studio_master: bool,
+    sfx: Vec<voidedit_audio::SfxInfo>,
     inspector_tab: usize,
     last_active: Instant,
     trimmed: bool,
@@ -211,6 +216,11 @@ impl App {
             show_strip: true,
             show_inspector: true,
             bin: 0,
+            show_studio: false,
+            studio_tab: 0,
+            studio_search: String::new(),
+            studio_master: false,
+            sfx: Vec::new(),
             inspector_tab: 0,
             last_active: Instant::now(),
             trimmed: false,
@@ -852,7 +862,7 @@ impl App {
 
     fn sync_audio(&mut self, ctx: &egui::Context) {
         if self.audio_project.as_ref() != Some(&self.project) {
-            self.audio.set_clips(audio_clips(&self.project));
+            self.audio.set_clips(audio_clips(&self.project), self.project.master_fx.clone());
             self.audio_project = Some(self.project.clone());
         }
         if self.playing != self.audio_playing {
@@ -879,6 +889,9 @@ impl App {
                 }
                 if widgets::head(ui, ph::SPARKLE, "Effects", self.show_toolbox).clicked() {
                     self.show_toolbox = !self.show_toolbox;
+                }
+                if widgets::head(ui, ph::WAVEFORM, "Sound Studio", self.show_studio).clicked() {
+                    self.show_studio = !self.show_studio;
                 }
                 if widgets::head(ui, ph::MUSIC_NOTES, "Sound Library", self.show_media && self.bin == 2).clicked() {
                     self.show_media = true;
@@ -1219,6 +1232,197 @@ impl App {
                 Ok(()) => "Export finished".into(),
                 Err(error) => format!("Export failed: {error}"),
             };
+        }
+    }
+
+    fn studio(&mut self, ui: &mut egui::Ui) {
+        let accent = self.accent();
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Sound Studio").strong().size(15.0));
+            ui.add_space(12.0);
+            for (index, icon, label) in [(0, ph::SLIDERS, "Effects"), (1, ph::CUBE, "3D Sound"), (2, ph::MUSIC_NOTES, "Sound Library")] {
+                if widgets::pill(ui, icon, label, self.studio_tab == index, accent).clicked() {
+                    self.studio_tab = index;
+                }
+            }
+        });
+        ui.separator();
+        match self.studio_tab {
+            0 => self.studio_effects(ui),
+            1 => self.studio_spatial(ui),
+            _ => self.studio_library(ui),
+        }
+    }
+
+    fn studio_effects(&mut self, ui: &mut egui::Ui) {
+        let accent = self.accent();
+        ui.horizontal(|ui| {
+            if widgets::pill(ui, ph::WAVEFORM, "Selected clip", !self.studio_master, accent).clicked() {
+                self.studio_master = false;
+            }
+            if widgets::pill(ui, ph::FADERS, "Master output", self.studio_master, accent).clicked() {
+                self.studio_master = true;
+            }
+        });
+        let master = self.studio_master;
+        let selected = self.selected.filter(|index| *index < self.project.clips.len());
+        if !master && selected.is_none() {
+            ui.add_space(20.0);
+            ui.label(RichText::new("Select a clip on the timeline, or choose Master output").weak());
+            return;
+        }
+        let height = ui.available_height();
+        ui.horizontal_top(|ui| {
+            ui.vertical(|ui| {
+                ui.set_width(190.0);
+                ui.set_min_height(height);
+                egui::ScrollArea::vertical().id_salt("studio-add").show(ui, |ui| {
+                    let mut last = "";
+                    for spec in voidedit_audio::SPECS {
+                        if spec.category != last {
+                            last = spec.category;
+                            ui.label(RichText::new(last).small().weak());
+                        }
+                        if ui.add(egui::Button::new(spec.name).min_size(Vec2::new(176.0, 22.0))).clicked() {
+                            let effect = voidedit_audio::Effect::new(spec.kind);
+                            match selected.filter(|_| !master) {
+                                Some(index) => self.project.clips[index].audio_fx.push(effect),
+                                None => self.project.master_fx.push(effect),
+                            }
+                        }
+                    }
+                });
+            });
+            let effects = match selected.filter(|_| !master) {
+                Some(index) => &mut self.project.clips[index].audio_fx,
+                None => &mut self.project.master_fx,
+            };
+            ui.vertical(|ui| {
+                egui::ScrollArea::vertical().id_salt("studio-chain").show(ui, |ui| {
+                    if effects.is_empty() {
+                        ui.label(RichText::new("Pick an effect on the left to add it to the chain").weak());
+                    }
+                    let mut remove = None;
+                    let mut raise = None;
+                    for (index, effect) in effects.iter_mut().enumerate() {
+                        let spec = voidedit_audio::Effect::spec_of(effect.kind);
+                        egui::Frame::new().fill(Color32::from_gray(30)).corner_radius(3).inner_margin(8).show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.horizontal(|ui| {
+                                ui.checkbox(&mut effect.enabled, RichText::new(spec.name).strong());
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if widgets::pill(ui, ph::TRASH, "", false, accent).on_hover_text("Remove").clicked() {
+                                        remove = Some(index);
+                                    }
+                                    if index > 0 && widgets::pill(ui, ph::ARROW_UP, "", false, accent).on_hover_text("Move earlier").clicked() {
+                                        raise = Some(index);
+                                    }
+                                });
+                            });
+                            for (position, (name, min, max, _)) in spec.params.iter().enumerate() {
+                                if let Some(value) = effect.values.get_mut(position) {
+                                    let logarithmic = name.ends_with("Hz") && *min > 0.0;
+                                    ui.add(egui::Slider::new(value, *min..=*max).logarithmic(logarithmic).text(*name));
+                                }
+                            }
+                        });
+                        ui.add_space(4.0);
+                    }
+                    if let Some(index) = remove {
+                        effects.remove(index);
+                    } else if let Some(index) = raise {
+                        effects.swap(index, index - 1);
+                    }
+                });
+            });
+        });
+    }
+
+    fn studio_spatial(&mut self, ui: &mut egui::Ui) {
+        let accent = self.accent();
+        let Some(clip) = self.selected.and_then(|index| self.project.clips.get_mut(index)) else {
+            ui.add_space(20.0);
+            ui.label(RichText::new("Select a clip on the timeline to place its sound in 3D").weak());
+            return;
+        };
+        let spatial = &mut clip.spatial;
+        ui.checkbox(&mut spatial.enabled, "Enable 3D sound");
+        ui.horizontal_top(|ui| {
+            let side = (ui.available_height() - 8.0).min(ui.available_width() * 0.55).clamp(140.0, 420.0);
+            let (response, painter) = ui.allocate_painter(Vec2::splat(side), Sense::click_and_drag());
+            let rect = response.rect;
+            const RANGE: f32 = 20.0;
+            painter.rect_filled(rect, 3.0_f32, Color32::from_gray(20));
+            for ring in 1..=4 {
+                painter.circle_stroke(rect.center(), side * ring as f32 / 8.0, Stroke::new(1.0_f32, Color32::from_gray(50)));
+            }
+            painter.circle_filled(rect.center(), 7.0, Color32::LIGHT_GRAY);
+            painter.text(rect.center_top() + Vec2::new(0.0, 10.0), egui::Align2::CENTER_CENTER, "Front", egui::FontId::proportional(11.0), Color32::GRAY);
+            painter.text(rect.center_bottom() - Vec2::new(0.0, 10.0), egui::Align2::CENTER_CENTER, "Behind", egui::FontId::proportional(11.0), Color32::GRAY);
+            if let Some(pointer) = response.interact_pointer_pos() {
+                spatial.x = (pointer.x - rect.center().x) / (side / 2.0) * RANGE;
+                spatial.z = (rect.center().y - pointer.y) / (side / 2.0) * RANGE;
+            }
+            let dot = rect.center() + Vec2::new(spatial.x / RANGE * side / 2.0, -spatial.z / RANGE * side / 2.0);
+            painter.circle_filled(dot.clamp(rect.min, rect.max), 8.0, accent);
+            ui.vertical(|ui| {
+                ui.add(egui::Slider::new(&mut spatial.x, -RANGE..=RANGE).text("Left and right (m)"));
+                ui.add(egui::Slider::new(&mut spatial.z, -RANGE..=RANGE).text("Back and front (m)"));
+                ui.add(egui::Slider::new(&mut spatial.y, -RANGE..=RANGE).text("Height (m)"));
+                ui.add(egui::Slider::new(&mut spatial.reference, 0.1..=20.0).text("Reference distance (m)"));
+                ui.add(egui::Slider::new(&mut spatial.rolloff, 0.0..=8.0).text("Distance rolloff"));
+                ui.add(egui::Slider::new(&mut spatial.head_shadow, 0.0..=1.0).text("Head shadow"));
+                ui.add(egui::Slider::new(&mut spatial.spread, 0.0..=1.0).text("Spread"));
+                ui.label(RichText::new(format!("Distance {:.1} m, level {:.0}%", spatial.distance(), spatial.gain() * 100.0)).weak());
+            });
+        });
+    }
+
+    fn studio_library(&mut self, ui: &mut egui::Ui) {
+        let accent = self.accent();
+        if self.sfx.is_empty() {
+            self.sfx = voidedit_audio::sfx_library();
+        }
+        ui.add(egui::TextEdit::singleline(&mut self.studio_search).hint_text(format!("Search {} sounds", self.sfx.len())).desired_width(f32::INFINITY));
+        let filter = self.studio_search.to_lowercase();
+        let matches: Vec<usize> = (0..self.sfx.len()).filter(|index| filter.is_empty() || self.sfx[*index].name.to_lowercase().contains(&filter) || self.sfx[*index].category.to_lowercase().contains(&filter)).collect();
+        let mut preview = None;
+        let mut add = None;
+        egui::ScrollArea::vertical().id_salt("studio-sfx").show_rows(ui, 28.0, matches.len(), |ui, rows| {
+            for position in rows {
+                let info = &self.sfx[matches[position]];
+                ui.horizontal(|ui| {
+                    if widgets::pill(ui, ph::PLAY, "", false, accent).on_hover_text("Preview").clicked() {
+                        preview = Some(info.id.clone());
+                    }
+                    if widgets::pill(ui, ph::PLUS, "", false, accent).on_hover_text("Add at the playhead").clicked() {
+                        add = Some((info.id.clone(), info.name.clone()));
+                    }
+                    ui.label(&info.name);
+                    ui.label(RichText::new(info.category).small().weak());
+                });
+            }
+        });
+        if let Some(id) = preview {
+            if let Some(samples) = voidedit_audio::render_sfx(&id, self.audio.rate()) {
+                self.audio.preview(&samples);
+            }
+        }
+        if let Some((id, name)) = add {
+            const SFX_RATE: u32 = 48_000;
+            let written = Settings::folder().map(|folder| folder.join("sounds")).and_then(|folder| {
+                std::fs::create_dir_all(&folder).ok()?;
+                let path = folder.join(format!("{name}.wav"));
+                if !path.exists() {
+                    let samples = voidedit_audio::render_sfx(&id, SFX_RATE)?;
+                    std::fs::write(&path, voidedit_audio::wav_bytes(&samples, SFX_RATE)).ok()?;
+                }
+                Some(path)
+            });
+            match written {
+                Some(path) => self.insert_media(&path.to_string_lossy()),
+                None => self.status = "Could not create that sound".to_string(),
+            }
         }
     }
 
@@ -2210,7 +2414,7 @@ impl App {
             let hover = pointer.is_some_and(|p| block.contains(p));
             let lift = ui.ctx().animate_bool_with_time(egui::Id::new(("clip-hover", index)), hover, 0.1);
             content.rect_filled(block, 2.0_f32, widgets::mix(fill, Color32::WHITE, 0.06 * lift));
-            content.rect_stroke(block, 2.0_f32, Stroke::new(1.0 + glow, Color32::from_gray(20).lerp_to_gamma(Color32::from_rgb(235, 60, 50), glow)), egui::StrokeKind::Inside);
+            content.rect_stroke(block, 2.0_f32, Stroke::new(1.0 + glow, Color32::from_gray(20).lerp_to_gamma(accent, glow)), egui::StrokeKind::Inside);
             let is_video = track.kind == TrackKind::Video;
             let name_bar = Rect::from_min_max(Pos2::new(block.left(), block.bottom() - 18.0), block.max);
             if is_video {
@@ -2491,7 +2695,13 @@ impl App {
         if self.show_inspector {
             egui::Panel::right("details").resizable(true).default_size(380.0).min_size(240.0).show_separator_line(false).frame(card).show_inside(root, |ui| self.controls_panel(ui));
         }
-        egui::CentralPanel::default().frame(card).show_inside(root, |ui| self.monitor(ui));
+        egui::CentralPanel::default().frame(card).show_inside(root, |ui| {
+            if self.show_studio {
+                self.studio(ui);
+            } else {
+                self.monitor(ui);
+            }
+        });
         self.finish_media_drag(ctx);
         if !ctx.input(|i| i.pointer.any_down()) && self.project != self.committed {
             let before = std::mem::replace(&mut self.committed, self.project.clone());

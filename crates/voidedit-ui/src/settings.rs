@@ -95,7 +95,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { accent: [230, 60, 50], theme: Theme::default(), backdrop: Backdrop::None, wallpaper: String::new(), wallpaper_dim: 0.45, animations: true, ui_scale: 1.0, preview_quality: 1.0, snapping: true, gpu_preview: false, system_accent: false, caption_language: "auto".into(), keys: Default::default() }
+        Self { accent: [150, 100, 235], theme: Theme::default(), backdrop: Backdrop::None, wallpaper: String::new(), wallpaper_dim: 0.45, animations: true, ui_scale: 1.0, preview_quality: 1.0, snapping: true, gpu_preview: false, system_accent: false, caption_language: "auto".into(), keys: Default::default() }
     }
 }
 
@@ -143,10 +143,14 @@ impl Settings {
     }
 
     pub fn load() -> Self {
-        Self::folder()
+        let mut settings: Self = Self::folder()
             .and_then(|folder| std::fs::read_to_string(folder.join("settings.json")).ok())
             .and_then(|text| serde_json::from_str(&text).ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        if settings.accent == [230, 60, 50] {
+            settings.accent = Self::default().accent;
+        }
+        settings
     }
 
     pub fn save(&self) {

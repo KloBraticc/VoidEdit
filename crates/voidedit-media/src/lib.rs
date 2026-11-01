@@ -212,6 +212,8 @@ pub struct AudioClip {
     pub pan: f32,
     pub bass: f32,
     pub treble: f32,
+    pub fx: Vec<voidedit_audio::Effect>,
+    pub spatial: voidedit_audio::Spatial,
 }
 
 #[derive(Clone)]
@@ -239,6 +241,7 @@ impl Gain {
 #[derive(Clone)]
 pub struct Audio {
     clips: Arc<Mutex<Vec<AudioClip>>>,
+    master: Arc<Mutex<Vec<voidedit_audio::Effect>>>,
     ring: Arc<Mutex<VecDeque<f32>>>,
     playing: Arc<AtomicBool>,
     position: Arc<AtomicI64>,
@@ -250,6 +253,7 @@ impl Audio {
     pub fn new(library: Library) -> Self {
         let audio = Self {
             clips: Arc::default(),
+            master: Arc::default(),
             ring: Arc::default(),
             playing: Arc::default(),
             position: Arc::default(),
@@ -261,8 +265,22 @@ impl Audio {
         audio
     }
 
-    pub fn set_clips(&self, clips: Vec<AudioClip>) {
+    pub fn set_clips(&self, clips: Vec<AudioClip>, master: Vec<voidedit_audio::Effect>) {
         *lock(&self.clips) = clips;
+        *lock(&self.master) = master;
+    }
+
+    pub fn rate(&self) -> u32 {
+        self.rate.load(Ordering::Relaxed)
+    }
+
+    pub fn preview(&self, mono: &[f32]) {
+        let mut ring = lock(&self.ring);
+        ring.clear();
+        for sample in mono {
+            ring.push_back(*sample * 0.8);
+            ring.push_back(*sample * 0.8);
+        }
     }
 
     pub fn play(&self, seconds: f64) {
@@ -314,6 +332,7 @@ impl Audio {
 
     fn run(self, library: Library) {
         let _stream = self.open_output();
+        let mut mixer = Mixer::default();
         loop {
             let rate = self.rate.load(Ordering::Relaxed);
             let target = (rate as f64 * AUDIO_BUFFER_SECONDS) as usize * 2;
@@ -324,7 +343,8 @@ impl Audio {
             let frames = (rate as f64 * AUDIO_CHUNK_SECONDS) as usize;
             let start = self.position.fetch_add(frames as i64, Ordering::Relaxed);
             let clips = lock(&self.clips).clone();
-            let mixed = mix(&library, &clips, start, frames, rate);
+            let master = lock(&self.master).clone();
+            let mixed = mixer.mix(&library, &clips, &master, start, frames, rate);
             if self.playing.load(Ordering::Relaxed) {
                 lock(&self.ring).extend(mixed);
             }
@@ -332,48 +352,102 @@ impl Audio {
     }
 }
 
-pub fn mix(library: &Library, clips: &[AudioClip], start: i64, frames: usize, rate: u32) -> Vec<f32> {
-    let mut mixed = vec![0.0f32; frames * 2];
-    let time = start as f64 / rate as f64;
-    let length = frames as f64 / rate as f64;
-    for clip in clips {
-        if time + length <= clip.start || time >= clip.end {
-            continue;
+const EFFECT_TAIL_SECONDS: f64 = 4.0;
+
+#[derive(Default)]
+struct ClipState {
+    chain: voidedit_audio::Chain,
+    spatial: voidedit_audio::SpatialState,
+}
+
+#[derive(Default)]
+pub struct Mixer {
+    clips: std::collections::HashMap<usize, ClipState>,
+    master: voidedit_audio::Chain,
+    next: i64,
+}
+
+impl Mixer {
+    pub fn mix(&mut self, library: &Library, clips: &[AudioClip], master: &[voidedit_audio::Effect], start: i64, frames: usize, rate: u32) -> Vec<f32> {
+        if start != self.next {
+            self.clips.clear();
+            self.master = voidedit_audio::Chain::default();
         }
-        let Some(source) = library.source(&clip.path) else { continue };
-        if source.info().audio().is_none() {
-            continue;
-        }
-        let speed = clip.speed.clamp(0.1, 16.0) as f64;
-        let elapsed = if clip.reverse { clip.end - time - length } else { time - clip.start };
-        let from = ((elapsed.max(0.0) * speed + clip.offset) * rate as f64) as i64;
-        let wanted = ((frames as f64 * speed).ceil() as usize).max(1);
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| source.audio(from.max(0), wanted, rate)));
-        let Ok(Ok(buffer)) = result else { continue };
-        let left = buffer.channels.first();
-        let right = buffer.channels.get(1).or(left);
-        if let (Some(left), Some(right)) = (left, right) {
-            let (pan_left, pan_right) = ((1.0 - clip.pan).min(1.0), (1.0 + clip.pan).min(1.0));
-            let (bass, treble) = (10f32.powf(clip.bass / 20.0), 10f32.powf(clip.treble / 20.0));
-            let (mut low_left, mut low_right) = (0.0f32, 0.0f32);
-            for index in 0..frames {
-                let position = if clip.reverse { frames - 1 - index } else { index };
-                let source_index = (position as f64 * speed) as usize;
-                let (Some(l), Some(r)) = (left.get(source_index), right.get(source_index)) else { break };
-                let gain = clip.gain.at(time + index as f64 / rate as f64);
-                low_left += (l - low_left) * 0.05;
-                low_right += (r - low_right) * 0.05;
-                let shaped_left = low_left * bass + (l - low_left) * treble;
-                let shaped_right = low_right * bass + (r - low_right) * treble;
-                mixed[index * 2] += shaped_left * gain * pan_left;
-                mixed[index * 2 + 1] += shaped_right * gain * pan_right;
+        self.next = start + frames as i64;
+        let mut out_left = vec![0.0f32; frames];
+        let mut out_right = vec![0.0f32; frames];
+        let mut left = vec![0.0f32; frames];
+        let mut right = vec![0.0f32; frames];
+        let time = start as f64 / rate as f64;
+        let length = frames as f64 / rate as f64;
+        for (index, clip) in clips.iter().enumerate() {
+            let inside = time + length > clip.start && time < clip.end;
+            let processed = !clip.fx.is_empty() || clip.spatial.enabled;
+            let in_tail = processed && !inside && time >= clip.end && time < clip.end + EFFECT_TAIL_SECONDS;
+            if !inside && !in_tail {
+                self.clips.remove(&index);
+                continue;
+            }
+            left.fill(0.0);
+            right.fill(0.0);
+            if inside {
+                render_clip(library, clip, time, length, frames, rate, &mut left, &mut right);
+            }
+            if processed {
+                let state = self.clips.entry(index).or_default();
+                state.chain.process(&clip.fx, &mut left, &mut right, rate);
+                if clip.spatial.enabled {
+                    clip.spatial.process(&mut state.spatial, &mut left, &mut right, rate);
+                }
+            }
+            for position in 0..frames {
+                out_left[position] += left[position];
+                out_right[position] += right[position];
             }
         }
+        self.master.process(master, &mut out_left, &mut out_right, rate);
+        let mut mixed = Vec::with_capacity(frames * 2);
+        for (l, r) in out_left.iter().zip(&out_right) {
+            mixed.push(l.clamp(-1.0, 1.0));
+            mixed.push(r.clamp(-1.0, 1.0));
+        }
+        mixed
     }
-    for sample in &mut mixed {
-        *sample = sample.clamp(-1.0, 1.0);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_clip(library: &Library, clip: &AudioClip, time: f64, length: f64, frames: usize, rate: u32, out_left: &mut [f32], out_right: &mut [f32]) {
+    let Some(source) = library.source(&clip.path) else { return };
+    if source.info().audio().is_none() {
+        return;
     }
-    mixed
+    let speed = clip.speed.clamp(0.1, 16.0) as f64;
+    let elapsed = if clip.reverse { clip.end - time - length } else { time - clip.start };
+    let from = ((elapsed.max(0.0) * speed + clip.offset) * rate as f64) as i64;
+    let wanted = ((frames as f64 * speed).ceil() as usize).max(1);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| source.audio(from.max(0), wanted, rate)));
+    let Ok(Ok(buffer)) = result else { return };
+    let left = buffer.channels.first();
+    let right = buffer.channels.get(1).or(left);
+    if let (Some(left), Some(right)) = (left, right) {
+        let (pan_left, pan_right) = ((1.0 - clip.pan).min(1.0), (1.0 + clip.pan).min(1.0));
+        let (bass, treble) = (10f32.powf(clip.bass / 20.0), 10f32.powf(clip.treble / 20.0));
+        let (mut low_left, mut low_right) = (0.0f32, 0.0f32);
+        for index in 0..frames {
+            let sample_time = time + index as f64 / rate as f64;
+            if sample_time < clip.start || sample_time >= clip.end {
+                continue;
+            }
+            let position = if clip.reverse { frames - 1 - index } else { index };
+            let source_index = (position as f64 * speed) as usize;
+            let (Some(l), Some(r)) = (left.get(source_index), right.get(source_index)) else { break };
+            let gain = clip.gain.at(sample_time);
+            low_left += (l - low_left) * 0.05;
+            low_right += (r - low_right) * 0.05;
+            out_left[index] += (low_left * bass + (l - low_left) * treble) * gain * pan_left;
+            out_right[index] += (low_right * bass + (r - low_right) * treble) * gain * pan_right;
+        }
+    }
 }
 
 pub fn match_patch(previous: &Image, next: &Image, center: (i64, i64), patch: i64, search: i64) -> Option<(i64, i64)> {
@@ -452,7 +526,7 @@ mod tests {
 
     #[test]
     fn mix_with_no_clips_is_silent() {
-        let mixed = mix(&Library::default(), &[], 0, 8, 48_000);
+        let mixed = Mixer::default().mix(&Library::default(), &[], &[], 0, 8, 48_000);
         assert_eq!(mixed, vec![0.0; 16]);
     }
 }

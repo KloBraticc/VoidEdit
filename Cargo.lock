@@ -5182,11 +5182,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "voidedit-audio"
+version = "1.0.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "voidedit-core"
 version = "1.0.0"
 dependencies = [
  "serde",
  "serde_json",
+ "voidedit-audio",
 ]
 
 [[package]]
@@ -5221,6 +5229,7 @@ dependencies = [
  "filmcraft-codecs",
  "filmcraft-media",
  "filmcraft-time",
+ "voidedit-audio",
  "voidedit-core",
  "voidedit-render",
 ]
@@ -5259,6 +5268,7 @@ dependencies = [
  "rfd",
  "serde",
  "serde_json",
+ "voidedit-audio",
  "voidedit-core",
  "voidedit-export",
  "voidedit-fx",

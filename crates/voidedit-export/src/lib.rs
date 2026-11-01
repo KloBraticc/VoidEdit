@@ -8,7 +8,7 @@ use std::sync::Arc;
 use filmcraft_h264enc::{Encoder, EncoderConfig, PacketFormat, RateControl};
 use filmcraft_isobmff::{AvcConfig, Brand, Mp4Writer, SampleEntry, TrackConfig, WriteSample, WriterOptions};
 use voidedit_core::Project;
-use voidedit_media::{decode_now, mix, AudioClip, FrameWant, Gain, Library};
+use voidedit_media::{decode_now, AudioClip, FrameWant, Gain, Library, Mixer};
 use voidedit_render::{render, Frame, Image};
 
 const AUDIO_RATE: u32 = 48_000;
@@ -57,6 +57,8 @@ pub fn audio_clips(project: &Project) -> Vec<AudioClip> {
                 pan: (clip.pan + project.tracks.get(clip.track).map_or(0.0, |track| track.pan)).clamp(-1.0, 1.0),
                 bass: clip.bass,
                 treble: clip.treble,
+                fx: clip.audio_fx.clone(),
+                spatial: clip.spatial.clone(),
             })
         })
         .collect();
@@ -135,12 +137,13 @@ fn write_wav(project: &Project, library: &Library, path: &Path, progress: &Arc<P
     header.extend_from_slice(&bytes.to_le_bytes());
     file.write_all(&header).map_err(|e| e.to_string())?;
     let mut position = 0i64;
+    let mut mixer = Mixer::default();
     while position < samples {
         if progress.cancel.load(Ordering::Relaxed) {
             return Err("cancelled".into());
         }
         let frames = (samples - position).min(4800) as usize;
-        for sample in mix(library, &clips, position, frames, AUDIO_RATE) {
+        for sample in mixer.mix(library, &clips, &project.master_fx, position, frames, AUDIO_RATE) {
             file.write_all(&((sample * 32767.0) as i16).to_le_bytes()).map_err(|e| e.to_string())?;
         }
         position += frames as i64;
@@ -222,6 +225,7 @@ fn write_mp4(project: &Project, library: &Library, path: &Path, options: ExportO
     let mut frame = Frame::default();
     let (mut y, mut u, mut v) = (vec![0; width * height], vec![0; width * height / 4], vec![0; width * height / 4]);
     let mut audio_position = 0i64;
+    let mut mixer = Mixer::default();
     for index in 0..total {
         if progress.cancel.load(Ordering::Relaxed) {
             return Err("cancelled".into());
@@ -236,7 +240,7 @@ fn write_mp4(project: &Project, library: &Library, path: &Path, options: ExportO
         if let Some((aac, track)) = &mut audio {
             let until = (index as i64 + 1) * AUDIO_RATE as i64 / fps as i64;
             let frames = (until - audio_position) as usize;
-            let mixed = mix(library, &clips, audio_position, frames, AUDIO_RATE);
+            let mixed = mixer.mix(library, &clips, &project.master_fx, audio_position, frames, AUDIO_RATE);
             audio_position = until;
             let left: Vec<f32> = mixed.iter().step_by(2).copied().collect();
             let right: Vec<f32> = mixed.iter().skip(1).step_by(2).copied().collect();

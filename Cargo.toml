@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/voidedit-core", "crates/voidedit-render", "crates/voidedit-ui", "crates/voidedit-media", "crates/voidedit-export", "crates/voidedit-fx", "crates/voidedit-speech", "crates/voidedit-update", "apps/voidedit"]
+members = ["crates/voidedit-audio", "crates/voidedit-core", "crates/voidedit-render", "crates/voidedit-ui", "crates/voidedit-media", "crates/voidedit-export", "crates/voidedit-fx", "crates/voidedit-speech", "crates/voidedit-update", "apps/voidedit"]
 
 [workspace.package]
 version = "1.0.0"
@@ -9,6 +9,7 @@ license = "MIT"
 repository = "https://github.com/KloBraticc/VoidEdit"
 
 [workspace.dependencies]
+voidedit-audio = { path = "crates/voidedit-audio" }
 voidedit-core = { path = "crates/voidedit-core" }
 voidedit-render = { path = "crates/voidedit-render" }
 voidedit-media = { path = "crates/voidedit-media" }

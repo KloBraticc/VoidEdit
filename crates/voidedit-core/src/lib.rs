@@ -423,6 +423,10 @@ pub struct Clip {
     #[serde(default = "default_zero")]
     pub depth: Param,
     #[serde(default)]
+    pub audio_fx: Vec<voidedit_audio::Effect>,
+    #[serde(default)]
+    pub spatial: voidedit_audio::Spatial,
+    #[serde(default)]
     pub muted: bool,
     #[serde(default)]
     pub pan: f32,
@@ -511,11 +515,14 @@ pub struct Project {
     pub media: Vec<String>,
     #[serde(default)]
     pub markers: Vec<u32>,
+    #[serde(default)]
+    pub master_fx: Vec<voidedit_audio::Effect>,
 }
 
 impl Default for Project {
     fn default() -> Self {
         Self {
+            master_fx: Vec::new(),
             width: 1920,
             height: 1080,
             fps: 30,
@@ -715,6 +722,8 @@ impl Project {
             Shape::Ellipse => ("Ellipse", [150, 90, 220], 400.0, 400.0),
         };
         Clip {
+            audio_fx: Vec::new(),
+            spatial: voidedit_audio::Spatial::default(),
             name: format!("{name} {index}"),
             track: self.track_of(TrackKind::Video),
             media: None,

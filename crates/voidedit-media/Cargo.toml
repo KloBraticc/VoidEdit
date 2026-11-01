@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+voidedit-audio.workspace = true
 voidedit-render.workspace = true
 voidedit-core.workspace = true
 cpal = "0.15"
