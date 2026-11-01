@@ -948,6 +948,9 @@ impl App {
         let revealed = path.to_string_lossy().into_owned();
         let spawned = std::thread::Builder::new().name("export".into()).spawn(move || {
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| export_with(&project, &library, &path, options, &shared))).unwrap_or_else(|_| Err("the export stopped unexpectedly".into()));
+            if shared.cancel.load(Ordering::Relaxed) && path.is_file() {
+                let _ = std::fs::remove_file(&path);
+            }
             if options.open_folder && outcome.is_ok() {
                 home::reveal(&revealed);
             }
@@ -1455,6 +1458,23 @@ impl App {
                         widgets::setting(ui, "Output size", |ui| {
                             ui.label(RichText::new(format!("{} x {}, {} fps", (width as u32 * factor) & !1, (height as u32 * factor) & !1, self.project.fps)).weak());
                         });
+                        if self.options.format == ExportFormat::Mp4 {
+                            widgets::setting(ui, "Frame rate", |ui| {
+                                let shown = if self.options.fps == 0 { format!("Project ({} fps)", self.project.fps) } else { format!("{} fps", self.options.fps) };
+                                egui::ComboBox::from_id_salt("export-fps").width(130.0).selected_text(shown).show_ui(ui, |ui| {
+                                    ui.selectable_value(&mut self.options.fps, 0, format!("Project ({} fps)", self.project.fps));
+                                    for fps in [24u32, 25, 30, 50, 60, 120].into_iter().filter(|fps| *fps < self.project.fps) {
+                                        ui.selectable_value(&mut self.options.fps, fps, format!("{fps} fps"));
+                                    }
+                                });
+                            });
+                            let rate = if self.options.fps == 0 { self.project.fps } else { self.options.fps.min(self.project.fps) };
+                            let frames = self.project.end_frame() as u64 * rate as u64 / self.project.fps.max(1) as u64;
+                            ui.label(RichText::new(format!("{frames} frames to export")).small().weak());
+                            if rate > 60 {
+                                ui.label(RichText::new("Above 60 fps exports take much longer, and most videos do not have that many real frames").small().color(Color32::from_rgb(240, 180, 80)));
+                            }
+                        }
                         widgets::setting(ui, "Motion blur", |ui| {
                             ui.checkbox(&mut self.project.motion_blur.enabled, "");
                         });
@@ -1561,6 +1581,7 @@ impl App {
         });
         self.show_shortcuts = show_shortcuts;
         let mut finished = None;
+        let mut cancelled = false;
         if let Some(job) = &self.job {
             let (done, total) = (job.progress.done.load(Ordering::Relaxed), job.progress.total.load(Ordering::Relaxed).max(1));
             let elapsed = job.started.elapsed().as_secs_f32();
@@ -1570,6 +1591,7 @@ impl App {
                 ui.label(format!("Frame {done} of {total}, {rate:.1} frames per second"));
                 if ui.button("Cancel").clicked() {
                     job.progress.cancel.store(true, Ordering::Relaxed);
+                    cancelled = true;
                 }
             });
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
@@ -1577,7 +1599,10 @@ impl App {
                 finished = slot.take();
             }
         }
-        if let Some(result) = finished {
+        if cancelled {
+            self.job = None;
+            self.status = "Export cancelled".into();
+        } else if let Some(result) = finished {
             self.job = None;
             self.status = match result {
                 Ok(()) => "Export finished".into(),

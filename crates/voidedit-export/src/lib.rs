@@ -104,6 +104,7 @@ pub struct ExportOptions {
     pub scale: f32,
     pub quality: f32,
     pub format: ExportFormat,
+    pub fps: u32,
     pub upscale: u32,
     pub sharpen: f32,
     pub speed: ExportSpeed,
@@ -141,7 +142,7 @@ pub enum ExportFormat {
 
 impl Default for ExportOptions {
     fn default() -> Self {
-        Self { scale: 1.0, quality: 20.0, format: ExportFormat::Mp4, upscale: 1, sharpen: 0.4, speed: ExportSpeed::Fastest, rate: ExportRate::Quality, bitrate: 12_000, keyframes: 120, main_profile: false, audio: true, audio_kbps: 192, first_frame: 0, last_frame: 0, open_folder: true }
+        Self { scale: 1.0, quality: 20.0, format: ExportFormat::Mp4, fps: 0, upscale: 1, sharpen: 0.4, speed: ExportSpeed::Fastest, rate: ExportRate::Quality, bitrate: 12_000, keyframes: 120, main_profile: false, audio: true, audio_kbps: 192, first_frame: 0, last_frame: 0, open_folder: true }
     }
 }
 
@@ -231,6 +232,8 @@ pub fn export(project: &Project, library: &Library, path: &Path, progress: &Arc<
     write_mp4(project, library, path, ExportOptions::default(), progress)
 }
 
+type Planes = (Vec<u8>, Vec<u8>, Vec<u8>);
+const SOURCE_STEPS: f64 = 240.0;
 const RENDER_AHEAD: usize = 8;
 
 fn write_mp4(project: &Project, library: &Library, path: &Path, options: ExportOptions, progress: &Arc<Progress>) -> Result<(), String> {
@@ -240,11 +243,13 @@ fn write_mp4(project: &Project, library: &Library, path: &Path, options: ExportO
     let height = ((project.height as f32 * scale) as usize * factor) & !1;
     let width = width.max(2);
     let height = height.max(2);
-    let fps = project.fps.max(1);
+    let project_fps = project.fps.max(1);
+    let fps = if options.fps == 0 { project_fps } else { options.fps.min(project_fps) };
     let project_end = project.end_frame().max(1);
     let last = if options.last_frame == 0 { project_end } else { options.last_frame.min(project_end) };
     let first = options.first_frame.min(last.saturating_sub(1));
-    let total = last - first;
+    let source_of = |position: u32| first + (position as u64 * project_fps as u64 / fps as u64) as u32;
+    let total = ((last - first) as u64 * fps as u64 / project_fps as u64).max(1) as u32;
     progress.total.store(total, Ordering::Relaxed);
     let mut config = EncoderConfig::new(width as u32, height as u32, fps, 1);
     config.format = PacketFormat::LengthPrefixed;
@@ -279,25 +284,48 @@ fn write_mp4(project: &Project, library: &Library, path: &Path, options: ExportO
         let track = writer.add_track(TrackConfig::new(entry, AUDIO_RATE)).map_err(|error| error.to_string())?;
         Some((aac, track))
     };
-    let mut audio_position = first as i64 * AUDIO_RATE as i64 / fps as i64;
+    let audio_start = first as i64 * AUDIO_RATE as i64 / project_fps as i64;
+    let mut audio_position = audio_start;
     let mut mixer = Mixer::default();
     std::thread::scope(|scope| -> Result<(), String> {
-        let (sender, receiver) = std::sync::mpsc::sync_channel::<(Vec<u8>, Vec<u8>, Vec<u8>)>(RENDER_AHEAD);
+        let (sender, receiver) = std::sync::mpsc::sync_channel::<Arc<Planes>>(RENDER_AHEAD);
         let worker_progress = progress.clone();
         scope.spawn(move || {
             let batch_size = std::thread::available_parallelism().map_or(4, |count| count.get()).clamp(2, RENDER_AHEAD);
-            let mut next = first;
-            while next < last {
+            let reusable = !project.has_motion();
+            let mut previous: Option<(Vec<String>, Arc<Planes>)> = None;
+            let mut next = 0u32;
+            while next < total {
                 if worker_progress.cancel.load(Ordering::Relaxed) {
                     return;
                 }
-                let batch: Vec<(u32, HashMap<String, Arc<Image>>)> = (next..(next + batch_size as u32).min(last)).map(|index| (index, gather(project, library, index))).collect();
-                next += batch.len() as u32;
-                let finished: Vec<(Vec<u8>, Vec<u8>, Vec<u8>)> = batch
+                let mut batch: Vec<(Option<u32>, HashMap<String, Arc<Image>>, Vec<String>)> = Vec::new();
+                while next < total && batch.len() < batch_size {
+                    if worker_progress.cancel.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    let index = source_of(next);
+                    next += 1;
+                    let mut wanted = Vec::new();
+                    project.wanted_media(index, 0, &mut wanted);
+                    let mut keys: Vec<String> = wanted.iter().map(|(path, seconds)| voidedit_core::media_key(path, (*seconds * SOURCE_STEPS).floor() / SOURCE_STEPS)).collect();
+                    keys.extend(project.clips.iter().enumerate().filter(|(_, clip)| index >= clip.start && index < clip.end).map(|(number, _)| number.to_string()));
+                    let last_keys = batch.last().map(|item| &item.2).or(previous.as_ref().map(|item| &item.0));
+                    if reusable && last_keys == Some(&keys) {
+                        batch.push((None, HashMap::new(), keys));
+                    } else {
+                        batch.push((Some(index), gather(project, library, index), keys));
+                    }
+                }
+                let finished: Vec<Option<Arc<Planes>>> = batch
                     .par_iter()
-                    .map(|(index, images)| {
+                    .map(|(index, images, _)| {
+                        let index = (*index)?;
+                        if worker_progress.cancel.load(Ordering::Relaxed) {
+                            return None;
+                        }
                         let mut frame = Frame::default();
-                        render_final(project, *index, scale, &mut frame, &|name| images.get(name).cloned());
+                        render_final(project, index, scale, &mut frame, &|name| images.get(name).cloned());
                         let (mut y, mut u, mut v) = (vec![0; width * height], vec![0; width * height / 4], vec![0; width * height / 4]);
                         if factor > 1 {
                             let mut enlarged = Frame::default();
@@ -306,26 +334,29 @@ fn write_mp4(project: &Project, library: &Library, path: &Path, options: ExportO
                         } else {
                             to_yuv(&frame, width, height, &mut y, &mut u, &mut v);
                         }
-                        (y, u, v)
+                        Some(Arc::new((y, u, v)))
                     })
                     .collect();
-                for planes in finished {
+                for ((_, _, keys), planes) in batch.into_iter().zip(finished) {
+                    let Some(planes) = planes.or_else(|| previous.as_ref().map(|item| item.1.clone())) else { return };
+                    previous = Some((keys, planes.clone()));
                     if sender.send(planes).is_err() {
                         return;
                     }
                 }
             }
         });
-        for (position, (y, u, v)) in receiver.iter().enumerate() {
+        for (position, planes) in receiver.iter().enumerate() {
+            let (y, u, v) = &*planes;
             if progress.cancel.load(Ordering::Relaxed) {
                 return Err("cancelled".into());
             }
-            let input = filmcraft_h264enc::YuvFrame { y: &y, u: &u, v: &v, y_stride: width, uv_stride: width / 2 };
+            let input = filmcraft_h264enc::YuvFrame { y, u, v, y_stride: width, uv_stride: width / 2 };
             for packet in encoder.encode(&input, position as i64).map_err(|error| format!("{error:?}"))? {
                 write_video(&mut writer, video, &packet)?;
             }
             if let Some((aac, track)) = &mut audio {
-                let until = (first as i64 + position as i64 + 1) * AUDIO_RATE as i64 / fps as i64;
+                let until = audio_start + (position as i64 + 1) * AUDIO_RATE as i64 / fps as i64;
                 let frames = (until - audio_position) as usize;
                 let mixed = mixer.mix(library, &clips, &project.master_fx, audio_position, frames, AUDIO_RATE);
                 audio_position = until;

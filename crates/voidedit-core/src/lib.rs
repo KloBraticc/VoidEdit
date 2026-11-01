@@ -638,6 +638,14 @@ impl Project {
         self.clips.push(outer);
     }
 
+    pub fn has_motion(&self) -> bool {
+        self.clips.iter().any(|clip| {
+            let keyed = [&clip.x, &clip.y, &clip.scale, &clip.rotation, &clip.rotation_x, &clip.rotation_y, &clip.depth, &clip.opacity].iter().any(|param| !param.keys.is_empty() || param.expression.is_some());
+            let timed = clip.fade_in > 0 || clip.fade_out > 0;
+            keyed || timed || !clip.animations.is_empty() || !clip.effects.is_empty() || clip.nested.is_some() || clip.lottie.is_some() || clip.typewriter || clip.text_style.wave != 0.0 || !clip.mask.points.is_empty()
+        })
+    }
+
     pub fn set_fps(&mut self, fps: u32) {
         let fps = fps.clamp(1, 240);
         if fps == self.fps || self.fps == 0 {
@@ -680,7 +688,12 @@ impl Project {
         if !blur.enabled || blur.shutter <= 0.0 {
             return vec![frame as f32];
         }
-        let samples = if preview { blur.samples.clamp(2, 4) } else { blur.samples.clamp(2, 64) };
+        let wanted = if preview { blur.samples.clamp(2, 4) } else { blur.samples.clamp(2, 64) };
+        let useful = (blur.shutter.min(2.0) / self.fps.max(1) as f32 * MAX_SOURCE_FPS).ceil() as u32;
+        let samples = if self.has_motion() { wanted } else { wanted.min(useful.max(1)) };
+        if samples < 2 {
+            return vec![frame as f32];
+        }
         (0..samples).map(|sample| frame as f32 + sample as f32 / samples as f32 * blur.shutter.min(2.0)).collect()
     }
 
@@ -955,6 +968,8 @@ impl Project {
 }
 
 pub const MAX_NESTING: u32 = 8;
+
+const MAX_SOURCE_FPS: f32 = 120.0;
 
 fn scale_keyframes(value: &mut serde_json::Value, ratio: f64) {
     match value {
