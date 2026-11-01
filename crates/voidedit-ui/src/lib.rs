@@ -541,7 +541,8 @@ impl App {
         if command(egui::Key::M) {
             self.show_export = true;
         }
-        if plain(egui::Key::Space) {
+        let bound = |settings: &Settings, action: &str| settings.key(action).is_some_and(|key| ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, key)));
+        if bound(&self.settings, "Play or pause") {
             self.playing = !self.playing;
         }
         if shift(egui::Key::Delete) {
@@ -549,16 +550,16 @@ impl App {
         } else if plain(egui::Key::Delete) || plain(egui::Key::Backspace) {
             self.delete_selected(false);
         }
-        if plain(egui::Key::V) {
+        if bound(&self.settings, "Selection tool") {
             self.tool = Tool::Select;
         }
-        if plain(egui::Key::C) {
+        if bound(&self.settings, "Razor tool") {
             self.tool = Tool::Razor;
         }
-        if plain(egui::Key::M) {
+        if bound(&self.settings, "Marker") {
             self.toggle_marker();
         }
-        if plain(egui::Key::T) {
+        if bound(&self.settings, "New text") {
             self.add_text();
         }
         if plain(egui::Key::ArrowLeft) {
@@ -808,6 +809,21 @@ impl App {
         }
         let mut show_shortcuts = self.show_shortcuts;
         egui::Window::new("Keyboard shortcuts").open(&mut show_shortcuts).collapsible(false).show(ctx, |ui| {
+            ui.strong("Change a key");
+            for (action, default) in settings::ACTIONS {
+                ui.horizontal(|ui| {
+                    ui.add_sized([120.0, 16.0], egui::Label::new(action));
+                    let mut text = self.settings.keys.get(action).cloned().unwrap_or_else(|| default.to_string());
+                    if ui.add(egui::TextEdit::singleline(&mut text).desired_width(70.0)).changed() {
+                        self.settings.keys.insert(action.to_string(), text.clone());
+                        self.settings.save();
+                    }
+                    if egui::Key::from_name(&text).is_none() {
+                        ui.colored_label(Color32::LIGHT_RED, "Unknown key");
+                    }
+                });
+            }
+            ui.separator();
             for (key, action) in [("Space", "Play or pause"), ("Left, Right", "Move one frame"), ("Up, Down", "Previous or next edit"), ("V", "Selection tool"), ("C", "Razor tool"), ("T", "New text"), ("M", "Marker"), ("Delete", "Delete clip"), ("Shift Delete", "Ripple delete"), ("Ctrl K", "Split at playhead"), ("Ctrl C, V, D", "Copy, paste, duplicate"), ("Ctrl Z", "Undo"), ("Ctrl Shift Z", "Redo"), ("Ctrl S", "Save"), ("Ctrl I", "Import"), ("Ctrl M", "Export"), ("Ctrl Scroll", "Zoom the timeline")] {
                 ui.horizontal(|ui| {
                     ui.add_sized([120.0, 16.0], egui::Label::new(RichText::new(key).monospace()));
@@ -1052,6 +1068,7 @@ impl App {
                         }
                         ui.label(format!("{} points", clip.mask.points.len()));
                     });
+                    ui.checkbox(&mut clip.mask.smooth, "Smooth curve");
                     ui.checkbox(&mut clip.mask.invert, "Invert");
                 } else if clip.mask.shape != MaskShape::None {
                     ui.add(egui::Slider::new(&mut clip.mask.x, 0.0..=1.0).text("X"));
@@ -1131,7 +1148,15 @@ impl App {
                             Self::param(ui, accent, "Amplitude", amplitude, frame, 0.5);
                             Self::param(ui, accent, "Frequency", frequency, frame, 0.1);
                         }
-                        Effect::EdgeDetect | Effect::Mirror => {}
+                        Effect::EdgeDetect | Effect::Mirror | Effect::Emboss | Effect::ChannelSwap => {}
+                        Effect::ChromaticAberration { amount } => Self::param(ui, accent, "Amount", amount, frame, 0.25),
+                        Effect::Scanlines { strength, spacing } => {
+                            Self::param(ui, accent, "Strength", strength, frame, 0.5);
+                            Self::param(ui, accent, "Spacing", spacing, frame, 0.25);
+                        }
+                        Effect::Swirl { angle } => Self::param(ui, accent, "Angle", angle, frame, 1.0),
+                        Effect::Kaleidoscope { segments } => Self::param(ui, accent, "Segments", segments, frame, 0.1),
+                        Effect::Fisheye { amount } => Self::param(ui, accent, "Amount", amount, frame, 0.5),
                         Effect::Solarize { level } => Self::param(ui, accent, "Level", level, frame, 1.0),
                         Effect::Vibrance { amount } => Self::param(ui, accent, "Amount", amount, frame, 0.5),
                         Effect::Duotone { dark, light } => {

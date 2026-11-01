@@ -22,7 +22,24 @@ pub struct Progress {
 
 pub fn audio_clips(project: &Project) -> Vec<AudioClip> {
     let fps = project.fps.max(1) as f64;
-    project
+    let mut nested = Vec::new();
+    for clip in project.clips.iter().filter(|clip| !clip.muted && !project.tracks.get(clip.track).is_some_and(|track| track.muted)) {
+        if let Some(inner) = &clip.nested {
+            let (start, end, offset) = (clip.start as f64 / fps, clip.end as f64 / fps, clip.offset as f64 / fps);
+            for mut child in audio_clips(inner) {
+                let begin = child.start - offset + start;
+                child.offset += (start - begin).max(0.0);
+                child.start = begin.max(start);
+                child.end = (child.end - offset + start).min(end);
+                child.gain.start = child.start;
+                child.gain.end = child.end;
+                if child.end > child.start {
+                    nested.push(child);
+                }
+            }
+        }
+    }
+    let mut clips: Vec<AudioClip> = project
         .clips
         .iter()
         .filter(|clip| !project.tracks.get(clip.track).is_some_and(|track| track.muted))
@@ -41,7 +58,9 @@ pub fn audio_clips(project: &Project) -> Vec<AudioClip> {
                 treble: clip.treble,
             })
         })
-        .collect()
+        .collect();
+    clips.append(&mut nested);
+    clips
 }
 
 fn to_yuv(frame: &Frame, width: usize, height: usize, y: &mut [u8], u: &mut [u8], v: &mut [u8]) {

@@ -41,6 +41,7 @@ pub enum Op {
     Solarize(f32),
     Vibrance(f32),
     Duotone([f32; 3], [f32; 3]),
+    Swap,
 }
 
 pub struct Lut {
@@ -138,6 +139,51 @@ pub struct Resolved {
     pub wave: (f32, f32),
     pub space: Option<Space>,
     pub mirror: bool,
+    pub warp: Warp,
+}
+
+#[derive(Clone, Copy, Default, PartialEq)]
+pub struct Warp {
+    pub aberration: f32,
+    pub scanlines: (f32, f32),
+    pub swirl: f32,
+    pub segments: f32,
+    pub fisheye: f32,
+}
+
+fn warp_uv(warp: &Warp, u: f32, v: f32) -> (f32, f32) {
+    let (mut x, mut y) = (u - 0.5, v - 0.5);
+    if warp.segments >= 2.0 {
+        let radius = (x * x + y * y).sqrt();
+        let wedge = std::f32::consts::TAU / warp.segments;
+        let angle = (y.atan2(x).rem_euclid(wedge) - wedge / 2.0).abs();
+        (x, y) = (radius * angle.cos(), radius * angle.sin());
+    }
+    if warp.swirl != 0.0 {
+        let radius = (x * x + y * y).sqrt();
+        let (sin, cos) = (warp.swirl * (1.0 - (radius * 2.0).min(1.0))).sin_cos();
+        (x, y) = (x * cos - y * sin, x * sin + y * cos);
+    }
+    if warp.fisheye != 0.0 {
+        let radius = (x * x + y * y).sqrt() * 2.0;
+        let bend = 1.0 + warp.fisheye * radius * radius;
+        (x, y) = (x * bend, y * bend);
+    }
+    ((x + 0.5).clamp(0.0, 1.0), (y + 0.5).clamp(0.0, 1.0))
+}
+
+fn smooth_points(points: &[[f32; 2]]) -> Vec<[f32; 2]> {
+    let mut current = points.to_vec();
+    for _ in 0..3 {
+        let mut next = Vec::with_capacity(current.len() * 2);
+        for index in 0..current.len() {
+            let (a, b) = (current[index], current[(index + 1) % current.len()]);
+            next.push([a[0] * 0.75 + b[0] * 0.25, a[1] * 0.75 + b[1] * 0.25]);
+            next.push([a[0] * 0.25 + b[0] * 0.75, a[1] * 0.25 + b[1] * 0.75]);
+        }
+        current = next;
+    }
+    current
 }
 
 #[derive(Clone, Copy)]
@@ -211,8 +257,15 @@ fn mask_alpha(mask: &voidedit_core::Mask, u: f32, v: f32) -> f32 {
             return 1.0;
         }
         let mut inside = false;
-        let mut previous = mask.points[mask.points.len() - 1];
-        for point in &mask.points {
+        let smoothed;
+        let points: &[[f32; 2]] = if mask.smooth {
+            smoothed = smooth_points(&mask.points);
+            &smoothed
+        } else {
+            &mask.points
+        };
+        let mut previous = points[points.len() - 1];
+        for point in points {
             if (point[1] > v) != (previous[1] > v) && u < (previous[0] - point[0]) * (v - point[1]) / (previous[1] - point[1]) + point[0] {
                 inside = !inside;
             }
@@ -282,6 +335,7 @@ fn apply(ops: &[Op], mut color: [f32; 3]) -> [f32; 3] {
                     color[index] = value.powf(1.0 / gamma[index].max(0.05)) * 255.0;
                 }
             }
+            Op::Swap => color = [color[2], color[0], color[1]],
             Op::Solarize(level) => color = color.map(|channel| if channel > level { 255.0 - channel } else { channel }),
             Op::Vibrance(amount) => {
                 let gray = luma(color);
@@ -462,6 +516,8 @@ fn resolve(clip: &Clip, frame: f32, scale: f32, image: Option<Arc<Image>>) -> Op
             Effect::Vibrance { amount } => ops.push(Op::Vibrance(amount.at(frame) / 100.0)),
             Effect::Duotone { dark, light } => ops.push(Op::Duotone(dark.map(|channel| channel as f32), light.map(|channel| channel as f32))),
             Effect::Mirror => mirror = true,
+            Effect::ChannelSwap => ops.push(Op::Swap),
+            Effect::Emboss | Effect::ChromaticAberration { .. } | Effect::Scanlines { .. } | Effect::Swirl { .. } | Effect::Kaleidoscope { .. } | Effect::Fisheye { .. } => {}
             Effect::HueShift { degrees } => ops.push(Op::Hue(degrees.at(frame).to_radians())),
             Effect::Gamma { amount } => ops.push(Op::Gamma(1.0 / amount.at(frame).max(0.05))),
             Effect::Levels { black, white } => ops.push(Op::Levels(black.at(frame), white.at(frame))),
@@ -477,6 +533,7 @@ fn resolve(clip: &Clip, frame: f32, scale: f32, image: Option<Arc<Image>>) -> Op
     };
     let mut lut = None;
     let mut wave = (0.0, 0.0);
+    let mut warp = Warp::default();
     for effect in &clip.effects {
         match effect {
             Effect::Lut { path } if !path.is_empty() => lut = load_lut(path),
@@ -492,6 +549,16 @@ fn resolve(clip: &Clip, frame: f32, scale: f32, image: Option<Arc<Image>>) -> Op
                     image = Some(Arc::new(glow(current, amount.at(frame).clamp(0.0, 200.0) / 100.0)));
                 }
             }
+            Effect::Emboss => {
+                if let Some(current) = &image {
+                    image = Some(Arc::new(convolve(current, [-2.0, -1.0, 0.0, -1.0, 1.0, 1.0, 0.0, 1.0, 2.0], true)));
+                }
+            }
+            Effect::ChromaticAberration { amount } => warp.aberration = amount.at(frame) * scale,
+            Effect::Scanlines { strength, spacing } => warp.scanlines = (strength.at(frame).clamp(0.0, 100.0) / 100.0, (spacing.at(frame) * scale).max(1.0)),
+            Effect::Swirl { angle } => warp.swirl = angle.at(frame).to_radians(),
+            Effect::Kaleidoscope { segments } => warp.segments = segments.at(frame).clamp(0.0, 32.0),
+            Effect::Fisheye { amount } => warp.fisheye = amount.at(frame) / 100.0,
             Effect::EdgeDetect => {
                 if let Some(current) = &image {
                     image = Some(Arc::new(convolve(current, [-1.0, -1.0, -1.0, -1.0, 8.0, -1.0, -1.0, -1.0, -1.0], false)));
@@ -555,6 +622,7 @@ fn resolve(clip: &Clip, frame: f32, scale: f32, image: Option<Arc<Image>>) -> Op
         wave,
         space: space_of(clip, frame, scale),
         mirror,
+        warp,
     })
 }
 
@@ -571,6 +639,7 @@ fn sample(layer: &Resolved, lx: f32, ly: f32) -> Option<([f32; 3], f32)> {
     if layer.mirror {
         u = 1.0 - (u * 2.0 - 1.0).abs();
     }
+    (u, v) = warp_uv(&layer.warp, u, v);
     if layer.pixelate > 1.0 {
         let (step_u, step_v) = (layer.pixelate / image.width.max(1) as f32, layer.pixelate / image.height.max(1) as f32);
         u = (u / step_u).floor() * step_u;
@@ -580,7 +649,13 @@ fn sample(layer: &Resolved, lx: f32, ly: f32) -> Option<([f32; 3], f32)> {
     let row = ((v * image.height as f32) as usize).min(image.height.saturating_sub(1));
     let start = (row * image.width + column) * 4;
     let pixel = image.pixels.get(start..start + 4)?;
-    let source = [pixel[0] as f32, pixel[1] as f32, pixel[2] as f32];
+    let mut source = [pixel[0] as f32, pixel[1] as f32, pixel[2] as f32];
+    if layer.warp.aberration != 0.0 {
+        let shift = (layer.warp.aberration * image.width as f32 / (layer.half_w * 2.0).max(1.0)) as i64;
+        let fetch = |offset: i64, channel: usize| image.pixels.get((row * image.width + (column as i64 + offset).clamp(0, image.width as i64 - 1) as usize) * 4 + channel).copied().unwrap_or(0) as f32;
+        source[0] = fetch(shift, 0);
+        source[2] = fetch(-shift, 2);
+    }
     let mut alpha = pixel[3] as f32 / 255.0;
     if let Some((key, tolerance, softness)) = layer.key {
         let distance = (0..3).map(|index| (source[index] - key[index]).powi(2)).sum::<f32>().sqrt();
@@ -630,6 +705,9 @@ fn draw(layer: &Resolved, px: f32, py: f32) -> Option<([f32; 3], f32)> {
         let (nx, ny) = (lx / layer.half_w, ly / layer.half_h);
         let falloff = 1.0 - layer.vignette * ((nx * nx + ny * ny) / 2.0).min(1.0);
         color = color.map(|channel| channel * falloff);
+    }
+    if layer.warp.scanlines.0 > 0.0 && (py / layer.warp.scanlines.1) as i64 % 2 == 0 {
+        color = color.map(|channel| channel * (1.0 - layer.warp.scanlines.0));
     }
     if let Some(lut) = &layer.lut {
         color = lut.apply(color);
@@ -726,6 +804,7 @@ pub fn layers(project: &Project, frame: u32, scale: f32, images: &dyn Fn(&str) -
                     wave: main.wave,
                     space: main.space,
                     mirror: main.mirror,
+                    warp: main.warp,
                 }),
                 _ => None,
             });

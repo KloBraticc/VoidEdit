@@ -116,6 +116,13 @@ pub enum Effect {
     Vibrance { amount: Param },
     Duotone { dark: [u8; 3], light: [u8; 3] },
     Mirror,
+    Emboss,
+    ChromaticAberration { amount: Param },
+    Scanlines { strength: Param, spacing: Param },
+    Swirl { angle: Param },
+    Kaleidoscope { segments: Param },
+    Fisheye { amount: Param },
+    ChannelSwap,
     HueShift { degrees: Param },
     Gamma { amount: Param },
     Levels { black: Param, white: Param },
@@ -182,15 +189,17 @@ pub struct Mask {
     pub feather: f32,
     pub invert: bool,
     pub points: Vec<[f32; 2]>,
+    pub smooth: bool,
 }
 
 impl Default for Mask {
     fn default() -> Self {
-        Self { shape: MaskShape::None, x: 0.5, y: 0.5, width: 0.6, height: 0.6, feather: 0.05, invert: false, points: Vec::new() }
+        Self { shape: MaskShape::None, x: 0.5, y: 0.5, width: 0.6, height: 0.6, feather: 0.05, invert: false, points: Vec::new(), smooth: true }
     }
 }
 
-pub const EFFECT_NAMES: [&str; 34] = [
+pub const EFFECT_NAMES: [&str; 41] = [
+    "Emboss", "Chromatic Aberration", "Scanlines", "Swirl", "Kaleidoscope", "Fisheye", "Channel Swap",
     "Solarize", "Vibrance", "Duotone", "Mirror",
     "Color Wheels", "Curves", "LUT", "Sharpen", "Glow", "Edge Detect", "Drop Shadow", "Wave",
     "Hue Shift", "Gamma", "Levels", "Color Balance", "Threshold", "Noise", "Chroma Key",
@@ -227,6 +236,13 @@ impl Effect {
             "Vibrance" => Effect::Vibrance { amount: Param::new(30.0) },
             "Duotone" => Effect::Duotone { dark: [30, 10, 80], light: [255, 220, 120] },
             "Mirror" => Effect::Mirror,
+            "Emboss" => Effect::Emboss,
+            "Chromatic Aberration" => Effect::ChromaticAberration { amount: Param::new(6.0) },
+            "Scanlines" => Effect::Scanlines { strength: Param::new(40.0), spacing: Param::new(4.0) },
+            "Swirl" => Effect::Swirl { angle: Param::new(90.0) },
+            "Kaleidoscope" => Effect::Kaleidoscope { segments: Param::new(6.0) },
+            "Fisheye" => Effect::Fisheye { amount: Param::new(50.0) },
+            "Channel Swap" => Effect::ChannelSwap,
             "Hue Shift" => Effect::HueShift { degrees: Param::new(0.0) },
             "Gamma" => Effect::Gamma { amount: Param::new(1.0) },
             "Levels" => Effect::Levels { black: Param::new(0.0), white: Param::new(255.0) },
@@ -267,6 +283,13 @@ impl Effect {
             Effect::Vibrance { .. } => "Vibrance",
             Effect::Duotone { .. } => "Duotone",
             Effect::Mirror => "Mirror",
+            Effect::Emboss => "Emboss",
+            Effect::ChromaticAberration { .. } => "Chromatic Aberration",
+            Effect::Scanlines { .. } => "Scanlines",
+            Effect::Swirl { .. } => "Swirl",
+            Effect::Kaleidoscope { .. } => "Kaleidoscope",
+            Effect::Fisheye { .. } => "Fisheye",
+            Effect::ChannelSwap => "Channel Swap",
             Effect::HueShift { .. } => "Hue Shift",
             Effect::Gamma { .. } => "Gamma",
             Effect::Levels { .. } => "Levels",
