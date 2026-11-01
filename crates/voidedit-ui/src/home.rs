@@ -216,6 +216,19 @@ impl Library {
         self.entries.iter_mut().find(|entry| entry.path == path)
     }
 
+    pub fn moved(&mut self, from: &Path, to: &Path) {
+        let old = from.to_string_lossy().into_owned();
+        let text = to.to_string_lossy().into_owned();
+        if let (Some(a), Some(b)) = (thumb_path(&old), thumb_path(&text)) {
+            let _ = std::fs::rename(a, b);
+        }
+        if let Some(entry) = self.entry(&old) {
+            entry.path = text;
+            entry.name = to.file_stem().map_or_else(String::new, |stem| stem.to_string_lossy().into_owned());
+        }
+        self.save();
+    }
+
     pub fn record(&mut self, path: &Path, project: &Project, opened: bool) {
         let text = path.to_string_lossy().into_owned();
         if self.entry(&text).is_none() {

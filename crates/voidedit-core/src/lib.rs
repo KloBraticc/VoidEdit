@@ -181,6 +181,7 @@ pub enum Effect {
     Threshold { level: Param },
     Noise { amount: Param },
     ChromaKey { color: [u8; 3], tolerance: Param, softness: Param },
+    Greenscreen { color: [u8; 3], similarity: Param, smoothness: Param, spill: Param, choke: Param, feather: Param, matte: bool },
     ColorWheels { lift: [f32; 3], gamma: [f32; 3], gain: [f32; 3] },
     Curves { shadows: Param, midtones: Param, highlights: Param },
     Lut { path: String },
@@ -286,7 +287,8 @@ impl Default for Mask {
     }
 }
 
-pub const EFFECT_NAMES: [&str; 49] = [
+pub const EFFECT_NAMES: [&str; 50] = [
+    "Greenscreen",
     "Motion Blur", "Zoom Blur", "Ripple", "Tile",
     "Letterbox", "Gradient Overlay", "Border", "Sketch",
     "Emboss", "Chromatic Aberration", "Scanlines", "Swirl", "Kaleidoscope", "Fisheye", "Channel Swap",
@@ -347,6 +349,7 @@ impl Effect {
             "Color Balance" => Effect::ColorBalance { red: Param::new(0.0), green: Param::new(0.0), blue: Param::new(0.0) },
             "Threshold" => Effect::Threshold { level: Param::new(128.0) },
             "Noise" => Effect::Noise { amount: Param::new(10.0) },
+            "Greenscreen" => Effect::Greenscreen { color: [0, 255, 0], similarity: Param::new(28.0), smoothness: Param::new(10.0), spill: Param::new(70.0), choke: Param::new(0.0), feather: Param::new(0.0), matte: false },
             "Chroma Key" => Effect::ChromaKey { color: [0, 255, 0], tolerance: Param::new(30.0), softness: Param::new(10.0) },
             _ => return None,
         })
@@ -404,6 +407,7 @@ impl Effect {
             Effect::Threshold { .. } => "Threshold",
             Effect::Noise { .. } => "Noise",
             Effect::ChromaKey { .. } => "Chroma Key",
+            Effect::Greenscreen { .. } => "Greenscreen",
         }
     }
 }

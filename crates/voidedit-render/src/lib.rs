@@ -680,6 +680,61 @@ pub fn styled_text_image(text: &str, size: f32, color: [u8; 3], stroke: f32, bac
     Some(Image { width, height, pixels })
 }
 
+pub struct KeySettings {
+    pub color: [u8; 3],
+    pub similarity: f32,
+    pub smoothness: f32,
+    pub spill: f32,
+    pub choke: i64,
+    pub feather: usize,
+    pub matte: bool,
+}
+
+pub fn greenscreen(source: &Image, settings: &KeySettings) -> Image {
+    let chroma = |r: f32, g: f32, b: f32| (-0.169 * r - 0.331 * g + 0.5 * b, 0.5 * r - 0.419 * g - 0.081 * b);
+    let [key_r, key_g, key_b] = settings.color.map(|channel| channel as f32 / 255.0);
+    let (key_u, key_v) = chroma(key_r, key_g, key_b);
+    let dominant = if key_g >= key_r && key_g >= key_b { 1 } else if key_b >= key_r { 2 } else { 0 };
+    let softness = settings.smoothness.max(0.001);
+    let mut pixels = source.pixels.clone();
+    pixels.par_chunks_exact_mut(4).for_each(|pixel| {
+        let (r, g, b) = (pixel[0] as f32 / 255.0, pixel[1] as f32 / 255.0, pixel[2] as f32 / 255.0);
+        let (u, v) = chroma(r, g, b);
+        let distance = ((u - key_u).powi(2) + (v - key_v).powi(2)).sqrt();
+        let keep = ((distance - settings.similarity * 0.5) / (softness * 0.5)).clamp(0.0, 1.0);
+        pixel[3] = (pixel[3] as f32 * keep) as u8;
+        let channels = [r, g, b];
+        let others = (0..3).filter(|index| *index != dominant).map(|index| channels[index]).sum::<f32>() / 2.0;
+        if channels[dominant] > others {
+            let reduced = channels[dominant] + (others - channels[dominant]) * settings.spill.clamp(0.0, 1.0);
+            pixel[dominant] = (reduced * 255.0) as u8;
+        }
+    });
+    let (width, height) = (source.width, source.height);
+    if settings.choke != 0 || settings.feather > 0 {
+        let mut alpha: Vec<u8> = pixels.chunks_exact(4).map(|pixel| pixel[3]).collect();
+        if settings.choke > 0 {
+            let inverted: Vec<u8> = alpha.iter().map(|value| 255 - value).collect();
+            alpha = dilate(&inverted, width, height, settings.choke.min(32)).iter().map(|value| 255 - value).collect();
+        } else if settings.choke < 0 {
+            alpha = dilate(&alpha, width, height, (-settings.choke).min(32));
+        }
+        if settings.feather > 0 {
+            alpha = blur_alpha(&alpha, width, height, settings.feather.min(64));
+        }
+        for (pixel, value) in pixels.chunks_exact_mut(4).zip(alpha) {
+            pixel[3] = value;
+        }
+    }
+    if settings.matte {
+        for pixel in pixels.chunks_exact_mut(4) {
+            let value = pixel[3];
+            pixel.copy_from_slice(&[value, value, value, 255]);
+        }
+    }
+    Image { width, height, pixels }
+}
+
 fn resolve(clip: &Clip, frame: f32, scale: f32, image: Option<Arc<Image>>) -> Option<Resolved> {
     let opacity = clip.opacity.at(frame).clamp(0.0, 100.0) / 100.0 * clip.fade(frame);
     let size = clip.scale.at(frame).max(0.0) / 100.0 * scale;
@@ -726,7 +781,7 @@ fn resolve(clip: &Clip, frame: f32, scale: f32, image: Option<Arc<Image>>) -> Op
             Effect::Levels { black, white } => ops.push(Op::Levels(black.at(frame), white.at(frame))),
             Effect::ColorBalance { red, green, blue } => ops.push(Op::Balance([red.at(frame), green.at(frame), blue.at(frame)])),
             Effect::Threshold { level } => ops.push(Op::Threshold(level.at(frame))),
-            Effect::Noise { .. } | Effect::ChromaKey { .. } => {}
+            Effect::Noise { .. } | Effect::ChromaKey { .. } | Effect::Greenscreen { .. } => {}
         }
     }
     let mut image = match (image, radius as usize) {
@@ -800,6 +855,12 @@ fn resolve(clip: &Clip, frame: f32, scale: f32, image: Option<Arc<Image>>) -> Op
             Effect::Swirl { angle } => warp.swirl = angle.at(frame).to_radians(),
             Effect::Kaleidoscope { segments } => warp.segments = segments.at(frame).clamp(0.0, 32.0),
             Effect::Fisheye { amount } => warp.fisheye = amount.at(frame) / 100.0,
+            Effect::Greenscreen { color, similarity, smoothness, spill, choke, feather, matte } => {
+                if let Some(current) = &image {
+                    let settings = KeySettings { color: *color, similarity: similarity.at(frame) / 100.0, smoothness: smoothness.at(frame) / 100.0, spill: spill.at(frame) / 100.0, choke: (choke.at(frame) * scale) as i64, feather: (feather.at(frame) * scale) as usize, matte: *matte };
+                    image = Some(Arc::new(greenscreen(current, &settings)));
+                }
+            }
             Effect::EdgeDetect => {
                 if let Some(current) = &image {
                     image = Some(Arc::new(convolve(current, [-1.0, -1.0, -1.0, -1.0, 8.0, -1.0, -1.0, -1.0, -1.0], false)));
@@ -1179,6 +1240,19 @@ mod tests {
         render_final(&project, 0, 1.0, &mut frame, &|_| None);
         let partial = frame.pixels.chunks_exact(4).filter(|pixel| pixel[0] > 10 && pixel[0] < 245).count();
         assert!(partial > 16, "{partial}");
+    }
+
+    #[test]
+    fn greenscreen_removes_the_key_and_keeps_the_subject_without_spill() {
+        let pixels = vec![0, 255, 0, 255, 200, 40, 40, 255, 120, 180, 110, 255, 130, 240, 40, 255];
+        let image = Image { width: 4, height: 1, pixels };
+        let settings = KeySettings { color: [0, 255, 0], similarity: 0.28, smoothness: 0.1, spill: 1.0, choke: 0, feather: 0, matte: false };
+        let result = greenscreen(&image, &settings);
+        assert_eq!(result.pixels[3], 0);
+        assert_eq!(&result.pixels[4..8], &[200, 40, 40, 255]);
+        assert!(result.pixels[9] <= 116, "{:?}", &result.pixels[8..12]);
+        let matte = greenscreen(&image, &KeySettings { matte: true, ..settings });
+        assert_eq!((matte.pixels[0], matte.pixels[4]), (0, 255));
     }
 
     #[test]

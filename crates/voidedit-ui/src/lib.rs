@@ -135,6 +135,8 @@ pub struct App {
     thumbs: Arc<Mutex<HashMap<String, egui::ColorImage>>>,
     thumb_textures: HashMap<String, egui::TextureHandle>,
     picking_track: bool,
+    picking_key: bool,
+    title_edit: String,
     tracking: Option<TrackJob>,
     track_target: usize,
     show_mixer: bool,
@@ -210,6 +212,8 @@ impl App {
             thumbs: Arc::default(),
             thumb_textures: HashMap::new(),
             picking_track: false,
+            picking_key: false,
+            title_edit: String::new(),
             tracking: None,
             track_target: 0,
             show_mixer: false,
@@ -1919,6 +1923,8 @@ impl App {
             LeftTab::Effects => {
                 let selected = self.selected;
                 egui::ScrollArea::vertical().show(ui, |ui| {
+                    self.custom_effects(ui, &filter);
+                    ui.separator();
                     for name in EFFECT_NAMES {
                         if !filter.is_empty() && !name.to_lowercase().contains(&filter) {
                             continue;
@@ -2062,6 +2068,173 @@ impl App {
         });
     }
 
+    fn custom_folder() -> Option<PathBuf> {
+        let folder = Settings::folder()?.join("effects");
+        std::fs::create_dir_all(&folder).ok()?;
+        Some(folder)
+    }
+
+    fn apply_custom_effect(&mut self, path: &std::path::Path) {
+        let extension = path.extension().map_or_else(String::new, |value| value.to_string_lossy().to_lowercase());
+        let text = path.to_string_lossy().into_owned();
+        if extension == "cube" {
+            match self.selected.and_then(|index| self.project.clips.get_mut(index)) {
+                Some(clip) => clip.effects.push(Effect::Lut { path: text }),
+                None => self.status = "Select a clip to apply this look".to_string(),
+            }
+            return;
+        }
+        if extension == "voideffect" {
+            let parsed = std::fs::read_to_string(path).ok().and_then(|text| serde_json::from_str::<CustomEffect>(&text).ok());
+            match (parsed, self.selected.and_then(|index| self.project.clips.get_mut(index))) {
+                (Some(custom), Some(clip)) => {
+                    clip.effects.extend(custom.effects);
+                    clip.animations.extend(custom.animations);
+                }
+                (None, _) => self.status = "That effect file could not be read".to_string(),
+                (_, None) => self.status = "Select a clip to apply this effect".to_string(),
+            }
+            return;
+        }
+        match voidedit_render::lottie::load(&text) {
+            Ok(animation) => {
+                let mut clip = self.project.new_clip(Shape::Solid, self.frame);
+                clip.name = path.file_stem().map_or_else(|| "Effect".to_string(), |stem| stem.to_string_lossy().into_owned());
+                clip.lottie = Some(text);
+                clip.width = animation.width as f32;
+                clip.height = animation.height as f32;
+                let seconds = (animation.end - animation.start) / animation.fps.max(1.0);
+                clip.end = self.frame + ((seconds * self.project.fps as f32).ceil() as u32).max(1);
+                let fit = (self.project.width as f32 / clip.width.max(1.0)).min(self.project.height as f32 / clip.height.max(1.0));
+                clip.scale = Param::new(fit * 100.0);
+                self.push_clip(clip);
+            }
+            Err(error) => self.status = format!("Could not use that effect: {error}"),
+        }
+    }
+
+    fn custom_effects(&mut self, ui: &mut egui::Ui, filter: &str) {
+        ui.strong("My Effects");
+        ui.horizontal(|ui| {
+            if ui.button(format!("{}  Import", ph::DOWNLOAD_SIMPLE)).on_hover_text("Void Edit effects, Lottie animations and .cube looks").clicked() {
+                if let Some(files) = rfd::FileDialog::new().add_filter("Effects", &["voideffect", "json", "lottie", "cube"]).pick_files() {
+                    if let Some(folder) = Self::custom_folder() {
+                        for file in files {
+                            if let Some(name) = file.file_name() {
+                                let _ = std::fs::copy(&file, folder.join(name));
+                            }
+                        }
+                    }
+                }
+            }
+            let clip = self.selected.and_then(|index| self.project.clips.get(index));
+            if ui.add_enabled(clip.is_some(), egui::Button::new(format!("{}  Save from clip", ph::FLOPPY_DISK))).on_hover_text("Save this clip's effects and animations as your own effect").clicked() {
+                if let (Some(clip), Some(folder)) = (clip, Self::custom_folder()) {
+                    let custom = CustomEffect { effects: clip.effects.clone(), animations: clip.animations.clone() };
+                    let name: String = clip.name.chars().filter(|c| c.is_alphanumeric() || " -_".contains(*c)).collect();
+                    if let Ok(text) = serde_json::to_string_pretty(&custom) {
+                        let _ = std::fs::write(folder.join(format!("{}.voideffect", if name.trim().is_empty() { "Effect" } else { name.trim() })), text);
+                    }
+                }
+            }
+        });
+        let Some(entries) = Self::custom_folder().and_then(|folder| std::fs::read_dir(folder).ok()) else { return };
+        let mut files: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).collect();
+        files.sort();
+        let mut chosen = None;
+        let mut remove = None;
+        for file in &files {
+            let name = file.file_stem().map_or_else(String::new, |stem| stem.to_string_lossy().into_owned());
+            if !filter.is_empty() && !name.to_lowercase().contains(filter) {
+                continue;
+            }
+            let response = ui.add(egui::Button::new(&name).min_size(Vec2::new(ui.available_width(), 26.0)));
+            if response.clicked() {
+                chosen = Some(file.clone());
+            }
+            response.context_menu(|ui| {
+                if ui.button("Delete effect").clicked() {
+                    remove = Some(file.clone());
+                    ui.close();
+                }
+            });
+        }
+        if let Some(file) = chosen {
+            self.apply_custom_effect(&file);
+        }
+        if let Some(file) = remove {
+            let _ = std::fs::remove_file(file);
+        }
+    }
+
+    fn project_details(&mut self, ui: &mut egui::Ui) {
+        let row = |ui: &mut egui::Ui, label: &str, add: &mut dyn FnMut(&mut egui::Ui)| {
+            ui.horizontal(|ui| {
+                ui.add_sized([100.0, 20.0], egui::Label::new(RichText::new(label).color(Color32::GRAY)));
+                add(ui);
+            });
+        };
+        let current = self.path.as_ref().and_then(|path| path.file_stem()).map_or("Untitled".to_string(), |stem| stem.to_string_lossy().into_owned());
+        let id = egui::Id::new("project-title");
+        if !ui.memory(|memory| memory.has_focus(id)) {
+            self.title_edit = current.clone();
+        }
+        let mut rename = false;
+        row(ui, "Title", &mut |ui| {
+            let response = ui.add(egui::TextEdit::singleline(&mut self.title_edit).id(id).desired_width(150.0));
+            rename = response.lost_focus();
+        });
+        let title = self.title_edit.trim().to_string();
+        if rename && !title.is_empty() && title != current {
+            if let Some(old) = self.path.clone() {
+                let clean: String = title.chars().filter(|c| c.is_alphanumeric() || " -_()".contains(*c)).collect();
+                let target = old.with_file_name(format!("{}.voidedit", clean.trim()));
+                if !target.exists() && std::fs::rename(&old, &target).is_ok() {
+                    self.projects.moved(&old, &target);
+                    self.path = Some(target);
+                } else {
+                    self.status = "Could not rename the project".to_string();
+                }
+            } else {
+                self.status = "Save the project before renaming it".to_string();
+            }
+        }
+        let (mut width, mut height) = (self.project.width, self.project.height);
+        row(ui, "Resolution", &mut |ui| {
+            ui.add(egui::DragValue::new(&mut width).range(16..=8192));
+            ui.label("x");
+            ui.add(egui::DragValue::new(&mut height).range(16..=8192));
+        });
+        row(ui, "Preset", &mut |ui| {
+            egui::ComboBox::from_id_salt("project-size").width(150.0).selected_text("Choose a size").show_ui(ui, |ui| {
+                for (label, w, h) in [("1080p", 1920, 1080), ("1440p", 2560, 1440), ("4K", 3840, 2160), ("720p", 1280, 720), ("Vertical", 1080, 1920), ("Square", 1080, 1080), ("Portrait 4:5", 1080, 1350), ("Ultrawide", 2560, 1080)] {
+                    if ui.selectable_label(width == w && height == h, label).clicked() {
+                        width = w;
+                        height = h;
+                    }
+                }
+            });
+        });
+        if (width & !1, height & !1) != (self.project.width, self.project.height) {
+            self.project.set_aspect((width & !1).max(16), (height & !1).max(16));
+        }
+        let mut background = self.project.background;
+        row(ui, "Background", &mut |ui| {
+            ui.color_edit_button_srgb(&mut background);
+        });
+        self.project.background = background;
+        let length = timecode(self.project.end_frame(), self.project.fps);
+        let clips = self.project.clips.len().to_string();
+        let media = self.project.media.len().to_string();
+        let tracks = self.project.tracks.len().to_string();
+        let markers = self.project.markers.len().to_string();
+        for (label, value) in [("Length", length), ("Clips", clips), ("Media files", media), ("Tracks", tracks), ("Markers", markers)] {
+            row(ui, label, &mut |ui| {
+                ui.label(value.as_str());
+            });
+        }
+    }
+
     fn project_audio_controls(&mut self, ui: &mut egui::Ui) {
         ui.strong("Master");
         ui.add(egui::Slider::new(&mut self.project.master_volume, 0.0..=200.0).suffix("%").text("Volume"));
@@ -2104,19 +2277,7 @@ impl App {
             return;
         }
         if selected.is_none() || tab == 5 {
-            let name = self.path.as_ref().and_then(|path| path.file_stem()).map_or("Untitled".to_string(), |stem| stem.to_string_lossy().into_owned());
-            let rows = [
-                ("Name", name),
-                ("Resolution", format!("{} x {}", self.project.width, self.project.height)),
-                ("Length", timecode(self.project.end_frame(), self.project.fps)),
-                ("Clips", self.project.clips.len().to_string()),
-            ];
-            for (label, value) in rows {
-                ui.horizontal(|ui| {
-                    ui.add_sized([100.0, 20.0], egui::Label::new(RichText::new(label).color(Color32::GRAY)));
-                    ui.label(value);
-                });
-            }
+            self.project_details(ui);
             ui.horizontal(|ui| {
                 ui.add_sized([100.0, 20.0], egui::Label::new(RichText::new("Frame rate").color(Color32::GRAY)));
                 let current = self.project.fps;
@@ -2387,6 +2548,26 @@ impl App {
                         }
                         Effect::Threshold { level } => Self::param(ui, accent, "Level", level, frame, 1.0),
                         Effect::Noise { amount } => Self::param(ui, accent, "Amount", amount, frame, 0.5),
+                        Effect::Greenscreen { color, similarity, smoothness, spill, choke, feather, matte } => {
+                            ui.horizontal(|ui| {
+                                ui.label("Key color");
+                                ui.color_edit_button_srgb(color);
+                                ui.toggle_value(&mut self.picking_key, format!("{}  Pick from video", ph::EYEDROPPER));
+                            });
+                            ui.horizontal(|ui| {
+                                for (label, value) in [("Green", [0u8, 255, 0]), ("Blue", [0, 0, 255])] {
+                                    if ui.button(label).clicked() {
+                                        *color = value;
+                                    }
+                                }
+                                ui.checkbox(matte, "Show matte");
+                            });
+                            Self::param(ui, accent, "Similarity", similarity, frame, 0.5);
+                            Self::param(ui, accent, "Smoothness", smoothness, frame, 0.5);
+                            Self::param(ui, accent, "Spill removal", spill, frame, 0.5);
+                            Self::param(ui, accent, "Edge choke", choke, frame, 0.25);
+                            Self::param(ui, accent, "Edge feather", feather, frame, 0.25);
+                        }
                         Effect::ChromaKey { color, tolerance, softness } => {
                             ui.color_edit_button_srgb(color);
                             Self::param(ui, accent, "Tolerance", tolerance, frame, 0.5);
@@ -2451,7 +2632,21 @@ impl App {
                 shown_rect = Some(picture.rect);
                 ui.painter().image(id, picture.rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
                 self.preview_overlay(ui, &picture);
-                if self.picking_track && picture.clicked() {
+                if self.picking_key && picture.clicked() {
+                    self.picking_key = false;
+                    if let Some(position) = picture.interact_pointer_pos() {
+                        let u = ((position.x - picture.rect.left()) / picture.rect.width()).clamp(0.0, 0.999);
+                        let v = ((position.y - picture.rect.top()) / picture.rect.height()).clamp(0.0, 0.999);
+                        let at = ((v * self.preview.height as f32) as usize * self.preview.width + (u * self.preview.width as f32) as usize) * 4;
+                        if let (Some(sample), Some(clip)) = (self.preview.pixels.get(at..at + 3), self.selected.and_then(|index| self.project.clips.get_mut(index))) {
+                            for effect in &mut clip.effects {
+                                if let Effect::Greenscreen { color, .. } = effect {
+                                    *color = [sample[0], sample[1], sample[2]];
+                                }
+                            }
+                        }
+                    }
+                } else if self.picking_track && picture.clicked() {
                     if let (Some(position), Some(index)) = (picture.interact_pointer_pos(), self.selected) {
                         if let Some(clip) = self.project.clips.get(index) {
                             let px = (position.x - picture.rect.left()) / picture.rect.width() * self.project.width as f32;
@@ -3255,6 +3450,14 @@ fn animation_controls(ui: &mut egui::Ui, clip: &mut Clip, accent: Color32) {
     if let Some(index) = remove {
         clip.animations.remove(index);
     }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CustomEffect {
+    #[serde(default)]
+    effects: Vec<Effect>,
+    #[serde(default)]
+    animations: Vec<Animation>,
 }
 
 fn section_tab(title: &str) -> usize {
