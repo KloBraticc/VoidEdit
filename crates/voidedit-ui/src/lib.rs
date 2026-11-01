@@ -1049,8 +1049,18 @@ impl App {
             ui.horizontal_centered(|ui| {
                                 let accent = self.accent();
                 ui.spacing_mut().item_spacing.x = 3.0;
-                let menu_button = widgets::icon_toggle(ui, ph::LIST, "Menu", false, accent);
-                egui::Popup::menu(&menu_button).show(|ui| {
+                ui.scope(|ui| {
+                    let visuals = ui.visuals_mut();
+                    for state in [&mut visuals.widgets.inactive, &mut visuals.widgets.open] {
+                        state.weak_bg_fill = Color32::TRANSPARENT;
+                        state.bg_fill = Color32::TRANSPARENT;
+                        state.bg_stroke = Stroke::NONE;
+                    }
+                    visuals.widgets.hovered.bg_stroke = Stroke::NONE;
+                    visuals.widgets.active.bg_stroke = Stroke::NONE;
+                    visuals.widgets.hovered.corner_radius = 5.into();
+                    ui.spacing_mut().button_padding = Vec2::new(7.0, 3.0);
+                    ui.menu_button(RichText::new(ph::LIST).size(17.0), |ui| {
                 ui.menu_button("File", |ui| {
                     let items: [(&str, fn(&mut App)); 7] = [
                         ("New", App::new_project),
@@ -1181,6 +1191,7 @@ impl App {
                     self.show_settings = true;
                     ui.close();
                 }
+                });
                 });
                 if widgets::icon_toggle(ui, ph::HOUSE, "Save and go to your projects", false, accent).clicked() {
                     self.go_home();

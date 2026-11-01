@@ -180,21 +180,32 @@ pub fn segment<T: Copy + PartialEq>(ui: &mut egui::Ui, items: &[(T, &str, &str)]
     egui::Frame::new().fill(Color32::WHITE.gamma_multiply(0.05)).corner_radius(7).inner_margin(2).show(ui, |ui| {
         ui.spacing_mut().item_spacing.x = 2.0;
         ui.horizontal(|ui| {
+            let slot = ui.painter().add(egui::Shape::Noop);
+            let mut target = None;
             for (value, icon, label) in items {
                 let active = *value == current;
                 let color = if active { Color32::WHITE } else { IDLE };
                 let words = ui.painter().layout_no_wrap((*label).to_string(), egui::FontId::proportional(13.0), color);
                 let (rect, response) = ui.allocate_exact_size(Vec2::new(words.size().x + 38.0, 24.0), Sense::click());
                 let (hover, _) = motion(ui, &response);
-                let on = ui.ctx().animate_bool_with_time(response.id.with("on"), active, 0.12);
-                ui.painter().rect_filled(rect, 5.0_f32, Color32::WHITE.gamma_multiply(0.06 * hover * (1.0 - on)));
-                ui.painter().rect_filled(rect, 5.0_f32, accent.gamma_multiply(on));
+                if active {
+                    target = Some(rect);
+                } else {
+                    ui.painter().rect_filled(rect, 5.0_f32, Color32::WHITE.gamma_multiply(0.06 * hover));
+                }
                 paint_icon(ui.painter(), rect.left_center() + Vec2::new(15.0, 0.0), 15.0, icon, color);
                 let height = words.size().y;
                 ui.painter().galley(egui::pos2(rect.left() + 28.0, rect.center().y - height / 2.0), words, color);
                 if response.clicked() {
                     picked = Some(*value);
                 }
+            }
+            if let Some(rect) = target {
+                let context = ui.ctx().clone();
+                let left = context.animate_value_with_time(ui.id().with("slide-left"), rect.left(), 0.18);
+                let right = context.animate_value_with_time(ui.id().with("slide-right"), rect.right(), 0.18);
+                let sliding = egui::Rect::from_min_max(egui::pos2(left, rect.top()), egui::pos2(right, rect.bottom()));
+                ui.painter().set(slot, egui::Shape::rect_filled(sliding, 5.0_f32, accent));
             }
         });
     });
