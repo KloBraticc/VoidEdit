@@ -562,6 +562,8 @@ pub struct Project {
     pub media: Vec<String>,
     #[serde(default)]
     pub markers: Vec<u32>,
+    #[serde(default = "default_track_volume")]
+    pub master_volume: f32,
     #[serde(default)]
     pub motion_blur: MotionBlur,
     #[serde(default)]
@@ -571,6 +573,7 @@ pub struct Project {
 impl Default for Project {
     fn default() -> Self {
         Self {
+            master_volume: 100.0,
             motion_blur: MotionBlur::default(),
             master_fx: Vec::new(),
             width: 1920,

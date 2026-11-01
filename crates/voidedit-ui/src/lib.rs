@@ -108,6 +108,7 @@ pub struct App {
     show_strip: bool,
     show_inspector: bool,
     bin: usize,
+    volume_before_mute: f32,
     player_full: bool,
     applied_round: Option<bool>,
     wallpaper_light: f32,
@@ -234,6 +235,7 @@ impl App {
             show_strip: true,
             show_inspector: true,
             bin: 0,
+            volume_before_mute: 100.0,
             player_full: false,
             applied_round: None,
             wallpaper_light: 0.5,
@@ -1951,6 +1953,23 @@ impl App {
         });
     }
 
+    fn project_audio_controls(&mut self, ui: &mut egui::Ui) {
+        ui.strong("Master");
+        ui.add(egui::Slider::new(&mut self.project.master_volume, 0.0..=200.0).suffix("%").text("Volume"));
+        ui.add_space(6.0);
+        ui.separator();
+        for track in self.project.tracks.iter_mut().filter(|track| track.kind == TrackKind::Audio) {
+            ui.strong(track.name.clone());
+            ui.push_id(track.name.clone(), |ui| {
+                ui.add(egui::Slider::new(&mut track.volume, 0.0..=200.0).suffix("%").text("Volume"));
+                ui.add(egui::Slider::new(&mut track.pan, -1.0..=1.0).text("Pan"));
+                ui.checkbox(&mut track.muted, "Mute track");
+            });
+            ui.add_space(6.0);
+        }
+        ui.label(RichText::new("Select a clip for its own volume, pan, bass, treble and fades").small().weak());
+    }
+
     fn controls_panel(&mut self, ui: &mut egui::Ui) {
         let frame = self.frame;
         let accent = self.accent();
@@ -1966,6 +1985,15 @@ impl App {
         let tab = self.inspector_tab;
         let names: Vec<String> = self.project.clips.iter().map(|clip| clip.name.clone()).collect();
         let selected = self.selected.filter(|index| *index < self.project.clips.len());
+        if selected.is_none() && tab == 1 {
+            self.project_audio_controls(ui);
+            return;
+        }
+        if selected.is_none() && tab != 5 && tab != 0 {
+            ui.add_space(16.0);
+            ui.vertical_centered(|ui| ui.label(RichText::new("Select a clip on the timeline to edit this").weak()));
+            return;
+        }
         if selected.is_none() || tab == 5 {
             let name = self.path.as_ref().and_then(|path| path.file_stem()).map_or("Untitled".to_string(), |stem| stem.to_string_lossy().into_owned());
             let rows = [
@@ -2084,12 +2112,25 @@ impl App {
                     ui.add(egui::Slider::new(&mut clip.pan, -1.0..=1.0).text("Pan"));
                     ui.add(egui::Slider::new(&mut clip.bass, -12.0..=12.0).text("Bass"));
                     ui.add(egui::Slider::new(&mut clip.treble, -12.0..=12.0).text("Treble"));
+                    let length = clip.end.saturating_sub(clip.start).max(1);
+                    ui.add(egui::Slider::new(&mut clip.fade_in, 0..=length).text("Fade in (frames)"));
+                    ui.add(egui::Slider::new(&mut clip.fade_out, 0..=length).text("Fade out (frames)"));
+                    if ui.button("Reset audio").clicked() {
+                        clip.volume.base = 100.0;
+                        clip.pan = 0.0;
+                        clip.bass = 0.0;
+                        clip.treble = 0.0;
+                        clip.muted = false;
+                    }
                 });
             } else if clip.text.is_none() {
                 ui.horizontal(|ui| {
                     ui.label("Color");
                     ui.color_edit_button_srgb(&mut clip.color);
                 });
+            }
+            if tab == 1 && clip.media.is_none() {
+                ui.label(RichText::new("This clip has no sound").weak());
             }
             section(ui, tab, format!("Effects ({})", clip.effects.len()), true, |ui| {
                 let mut remove = None;
@@ -2318,7 +2359,7 @@ impl App {
         child.add_space(8.0);
         let text = |frame: u32| RichText::new(timecode(frame, fps)).monospace().size(12.0).color(Color32::WHITE);
         child.label(text(self.frame));
-        let remaining = (child.available_width() - 130.0).max(40.0);
+        let remaining = (child.available_width() - 250.0).max(40.0);
         child.allocate_ui(Vec2::new(remaining, 18.0), |ui| {
             ui.set_width(remaining);
             if widgets::scrubber(ui, &mut position, end as f32, accent) {
@@ -2326,6 +2367,17 @@ impl App {
             }
         });
         child.label(text(end));
+        let silent = self.project.master_volume <= 0.0;
+        if widgets::head(&mut child, if silent { ph::SPEAKER_SLASH } else { ph::SPEAKER_HIGH }, "", false).on_hover_text("Mute").clicked() {
+            if silent {
+                self.project.master_volume = self.volume_before_mute.max(1.0);
+            } else {
+                self.volume_before_mute = self.project.master_volume;
+                self.project.master_volume = 0.0;
+            }
+        }
+        child.spacing_mut().slider_width = 80.0;
+        child.add(egui::Slider::new(&mut self.project.master_volume, 0.0..=200.0).show_value(false)).on_hover_text("Master volume");
         let label = if self.player_full { "Exit fullscreen (Esc)" } else { "Fullscreen" };
         if widgets::head(&mut child, if self.player_full { ph::CORNERS_IN } else { ph::CORNERS_OUT }, "", self.player_full).on_hover_text(label).clicked() {
             self.player_full = !self.player_full;

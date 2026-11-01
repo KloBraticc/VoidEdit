@@ -63,6 +63,10 @@ pub fn audio_clips(project: &Project) -> Vec<AudioClip> {
         })
         .collect();
     clips.append(&mut nested);
+    let master = project.master_volume.max(0.0) / 100.0;
+    for clip in &mut clips {
+        clip.gain.level *= master;
+    }
     clips
 }
 
