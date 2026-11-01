@@ -1049,7 +1049,8 @@ impl App {
             ui.horizontal_centered(|ui| {
                                 let accent = self.accent();
                 ui.spacing_mut().item_spacing.x = 3.0;
-                egui::containers::menu::MenuButton::from_button(egui::Button::new(RichText::new(ph::LIST).size(17.0)).frame_when_inactive(false).min_size(Vec2::new(30.0, 28.0))).ui(ui, |ui| {
+                let menu_button = widgets::icon_toggle(ui, ph::LIST, "Menu", false, accent);
+                egui::Popup::menu(&menu_button).show(|ui| {
                 ui.menu_button("File", |ui| {
                     let items: [(&str, fn(&mut App)); 7] = [
                         ("New", App::new_project),
