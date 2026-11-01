@@ -158,6 +158,23 @@ pub fn decode_now(library: &Library, want: &FrameWant) -> Option<Arc<Image>> {
     decode(&library.source(&want.path)?, want)
 }
 
+pub fn mono_samples(library: &Library, path: &str, rate: u32) -> Option<Vec<f32>> {
+    let source = library.source(path)?;
+    let info = source.info();
+    info.audio()?;
+    let total = (info.duration.0 as f64 / filmcraft_time::TICKS_PER_SECOND as f64 * rate as f64) as usize;
+    let mut samples = Vec::with_capacity(total);
+    while samples.len() < total {
+        let frames = (total - samples.len()).min(rate as usize * 10);
+        let buffer = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| source.audio(samples.len() as i64, frames, rate))).ok()?.ok()?;
+        let channels = buffer.channels.len().max(1) as f32;
+        for index in 0..frames {
+            samples.push(buffer.channels.iter().filter_map(|channel| channel.get(index)).sum::<f32>() / channels);
+        }
+    }
+    Some(samples)
+}
+
 pub fn waveform(library: &Library, path: &str, points: usize) -> Option<Vec<f32>> {
     let source = library.source(path)?;
     let info = source.info();

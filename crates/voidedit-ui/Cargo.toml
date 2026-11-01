@@ -10,6 +10,7 @@ voidedit-render.workspace = true
 voidedit-media.workspace = true
 voidedit-export.workspace = true
 voidedit-gpu.workspace = true
+voidedit-speech = { path = "../voidedit-speech" }
 serde.workspace = true
 serde_json.workspace = true
 eframe.workspace = true

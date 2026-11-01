@@ -12,7 +12,7 @@ use settings::Settings;
 use voidedit_core::{timecode, Clip, Ease, Effect, History, MaskShape, Param, Project, Shape, TrackKind, BLENDS, EFFECT_NAMES, LOOKS, TRANSITIONS};
 use voidedit_export::{audio_clips, export_with, ExportFormat, ExportOptions, Progress};
 use voidedit_gpu::GpuCompositor;
-use voidedit_media::{decode_now, track_point, waveform, Audio, FrameWant, Frames, Library};
+use voidedit_media::{decode_now, mono_samples, track_point, waveform, Audio, FrameWant, Frames, Library};
 use voidedit_render::{render, Frame};
 
 const HEADER_WIDTH: f32 = 128.0;
@@ -108,6 +108,14 @@ enum Gizmo {
     MaskPoint(usize),
 }
 
+#[derive(Default)]
+struct CaptionJob {
+    message: String,
+    segments: Option<Result<Vec<voidedit_speech::Segment>, String>>,
+    start: f64,
+    offset: f64,
+}
+
 struct TrackJob {
     points: Arc<Mutex<Vec<(u32, (i64, i64))>>>,
     done: Arc<std::sync::atomic::AtomicBool>,
@@ -145,6 +153,7 @@ pub struct App {
     left: LeftTab,
     dock: Option<DockState<Pane>>,
     drawing_mask: bool,
+    captioning: Option<Arc<Mutex<CaptionJob>>>,
     gizmo: Option<Gizmo>,
     thumbs: Arc<Mutex<HashMap<String, egui::ColorImage>>>,
     thumb_textures: HashMap<String, egui::TextureHandle>,
@@ -207,6 +216,7 @@ impl App {
             left: LeftTab::Project,
             dock: Some(Settings::folder().and_then(|folder| std::fs::read_to_string(folder.join("layout.json")).ok()).and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_else(default_layout)),
             drawing_mask: false,
+            captioning: None,
             gizmo: None,
             thumbs: Arc::default(),
             thumb_textures: HashMap::new(),
@@ -430,6 +440,69 @@ impl App {
             for file in files {
                 self.add_media(file.to_string_lossy().into_owned());
             }
+        }
+    }
+
+    fn generate_captions(&mut self) {
+        if self.captioning.is_some() {
+            return;
+        }
+        let Some(clip) = self.selected.and_then(|index| self.project.clips.get(index)) else {
+            self.status = "Select a video or audio clip first".into();
+            return;
+        };
+        let Some(path) = clip.media.clone() else {
+            self.status = "Select a video or audio clip first".into();
+            return;
+        };
+        let Some(base) = Settings::folder() else { return };
+        let fps = self.project.fps.max(1) as f64;
+        let job = Arc::new(Mutex::new(CaptionJob { start: clip.start as f64 / fps, offset: clip.offset as f64 / fps, ..CaptionJob::default() }));
+        let (shared, library, repaint) = (job.clone(), self.library.clone(), self.context.clone());
+        let spawned = std::thread::Builder::new().name("captions".into()).spawn(move || {
+            let say = |text: &str| {
+                if let Ok(mut state) = shared.lock() {
+                    state.message = text.to_string();
+                }
+                repaint.request_repaint();
+            };
+            let folder = voidedit_speech::model_folder(&base);
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                voidedit_speech::ensure_model(&folder, say)?;
+                say("Reading the audio");
+                let samples = mono_samples(&library, &path, voidedit_speech::SAMPLE_RATE as u32).ok_or("This clip has no audio")?;
+                say("Listening for speech");
+                voidedit_speech::transcribe(&folder, &samples, |amount| say(&format!("Listening for speech: {:.0}%", amount * 100.0)))
+            }))
+            .unwrap_or_else(|_| Err("Caption generation stopped unexpectedly".into()));
+            if let Ok(mut state) = shared.lock() {
+                state.segments = Some(outcome);
+            }
+            repaint.request_repaint();
+        });
+        if spawned.is_ok() {
+            self.captioning = Some(job);
+        }
+    }
+
+    fn finish_captions(&mut self) {
+        let Some(job) = &self.captioning else { return };
+        let Ok(mut state) = job.lock() else { return };
+        self.status = state.message.clone();
+        let Some(result) = state.segments.take() else { return };
+        let (start, offset) = (state.start, state.offset);
+        drop(state);
+        self.captioning = None;
+        match result {
+            Ok(segments) => {
+                let mut count = 0;
+                for segment in segments.iter().filter(|segment| segment.end > offset) {
+                    self.project.add_spoken_caption(start + (segment.start - offset).max(0.0), start + segment.end - offset, &segment.text);
+                    count += 1;
+                }
+                self.status = format!("Added captions from {count} spoken parts");
+            }
+            Err(error) => self.status = format!("Could not make captions: {error}"),
         }
     }
 
@@ -772,6 +845,10 @@ impl App {
                     }
                 });
                 ui.menu_button("Captions", |ui| {
+                    if ui.button("Generate from Selected Clip").on_hover_text("Downloads a 144 MB speech model the first time, English only").clicked() {
+                        ui.close_menu();
+                        self.generate_captions();
+                    }
                     if ui.button("Import SRT...").clicked() {
                         ui.close_menu();
                         self.import_captions();
@@ -1756,6 +1833,7 @@ impl eframe::App for App {
         self.sync_audio(ctx);
         self.autosave();
         self.finish_tracking();
+        self.finish_captions();
         self.menu(ctx);
         self.windows(ctx);
         if let Some(mut dock) = self.dock.take() {

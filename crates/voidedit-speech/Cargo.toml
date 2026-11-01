@@ -1,0 +1,13 @@
+[package]
+name = "voidedit-speech"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+candle-core = "0.8"
+candle-nn = "0.8"
+candle-transformers = "0.8"
+tokenizers = { version = "0.20", default-features = false, features = ["unstable_wasm"] }
+serde_json.workspace = true
+ureq = "2"

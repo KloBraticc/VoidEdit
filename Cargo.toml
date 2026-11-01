@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/voidedit-core", "crates/voidedit-render", "crates/voidedit-ui", "crates/voidedit-media", "crates/voidedit-export", "crates/voidedit-gpu", "crates/voidedit-update", "apps/voidedit"]
+members = ["crates/voidedit-core", "crates/voidedit-render", "crates/voidedit-ui", "crates/voidedit-media", "crates/voidedit-export", "crates/voidedit-gpu", "crates/voidedit-speech", "crates/voidedit-update", "apps/voidedit"]
 
 [workspace.package]
 version = "1.0.0"

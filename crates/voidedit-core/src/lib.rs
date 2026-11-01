@@ -602,8 +602,37 @@ impl Project {
         best
     }
 
-    pub fn import_srt(&mut self, text: &str) -> usize {
+    pub fn add_caption(&mut self, from: f64, to: f64, text: &str) {
         let fps = self.fps as f64;
+        let mut clip = self.new_text((from * fps) as u32);
+        clip.end = ((to * fps) as u32).max(clip.start + 1);
+        clip.name = "Caption".into();
+        clip.text = Some(text.to_string());
+        clip.text_size = 54.0;
+        clip.text_stroke = 3.0;
+        clip.y = Param::new(self.height as f32 * 0.88);
+        clip.track = self.tracks.len() - 1;
+        self.duration = self.duration.max(clip.end + self.fps);
+        self.clips.push(clip);
+    }
+
+    pub fn add_spoken_caption(&mut self, from: f64, to: f64, text: &str) {
+        const WORDS_PER_CAPTION: usize = 7;
+        let words: Vec<&str> = text.split_whitespace().collect();
+        if words.is_empty() {
+            return;
+        }
+        let pieces: Vec<String> = words.chunks(WORDS_PER_CAPTION).map(|chunk| chunk.join(" ")).collect();
+        let total: usize = pieces.iter().map(String::len).sum::<usize>().max(1);
+        let mut start = from;
+        for piece in pieces {
+            let end = start + (to - from) * piece.len() as f64 / total as f64;
+            self.add_caption(start, end, &piece);
+            start = end;
+        }
+    }
+
+    pub fn import_srt(&mut self, text: &str) -> usize {
         let mut added = 0;
         let normalized = text.replace("\r\n", "\n");
         for block in normalized.split("\n\n") {
@@ -616,16 +645,7 @@ impl Project {
             if caption.is_empty() || to <= from {
                 continue;
             }
-            let mut clip = self.new_text((from * fps) as u32);
-            clip.end = ((to * fps) as u32).max(clip.start + 1);
-            clip.name = "Caption".into();
-            clip.text = Some(caption.join("\n"));
-            clip.text_size = 54.0;
-            clip.text_stroke = 3.0;
-            clip.y = Param::new(self.height as f32 * 0.88);
-            clip.track = self.tracks.len() - 1;
-            self.duration = self.duration.max(clip.end + self.fps);
-            self.clips.push(clip);
+            self.add_caption(from, to, &caption.join("\n"));
             added += 1;
         }
         added
@@ -915,6 +935,14 @@ mod tests {
         project.set_aspect(1080, 1920);
         assert_eq!(project.clips[0].x.base, 540.0);
         assert_eq!(project.clips[0].y.base, 960.0);
+    }
+
+    #[test]
+    fn spoken_captions_split_into_short_lines() {
+        let mut project = Project::default();
+        project.add_spoken_caption(0.0, 10.0, "one two three four five six seven eight nine");
+        assert_eq!(project.clips.len(), 2);
+        assert_eq!(project.clips[1].text.as_deref(), Some("eight nine"));
     }
 
     #[test]
