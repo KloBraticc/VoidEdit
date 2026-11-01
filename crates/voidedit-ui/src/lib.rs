@@ -351,17 +351,27 @@ impl App {
     }
 
     fn import_lottie(&mut self) {
-        let Some(path) = rfd::FileDialog::new().add_filter("Lottie or Bodymovin", &["json", "lottie"]).pick_file() else { return };
-        match std::fs::read_to_string(&path).map_err(|error| error.to_string()).and_then(|text| voidedit_core::lottie::import(&text)) {
-            Ok(report) => {
-                self.project = report.project;
+        let Some(path) = rfd::FileDialog::new().add_filter("Lottie animation", &["json", "lottie"]).pick_file() else { return };
+        let text = path.to_string_lossy().into_owned();
+        match voidedit_render::lottie::load(&text) {
+            Ok(animation) => {
+                let frames = ((animation.end - animation.start).ceil() as u32).max(1);
+                let mut project = Project { width: animation.width & !1, height: animation.height & !1, fps: (animation.fps.round() as u32).clamp(1, 240), duration: frames, ..Project::default() };
+                let mut clip = project.new_clip(Shape::Solid, 0);
+                clip.name = path.file_stem().map_or_else(|| "Animation".to_string(), |stem| stem.to_string_lossy().into_owned());
+                clip.lottie = Some(text);
+                clip.width = project.width as f32;
+                clip.height = project.height as f32;
+                clip.end = frames;
+                project.clips.push(clip);
+                self.project = project;
                 self.committed = self.project.clone();
                 self.history = History::default();
                 self.path = None;
                 self.selected = None;
                 self.frame = 0;
                 self.show_home = false;
-                self.status = if report.skipped.is_empty() { format!("Imported {} layers", report.imported) } else { format!("Imported {} layers, skipped {}: {}", report.imported, report.skipped.len(), report.skipped.join(", ")) };
+                self.status = if animation.warnings.is_empty() { "Animation imported".to_string() } else { format!("Imported, but these are not supported: {}", animation.warnings.join(", ")) };
             }
             Err(error) => self.status = format!("Could not import: {error}"),
         }

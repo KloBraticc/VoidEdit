@@ -1,3 +1,5 @@
+pub mod lottie;
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -1083,6 +1085,10 @@ fn layers_at(project: &Project, frame: u32, time: f32, scale: f32, images: &dyn 
                 let mut nested = Frame::default();
                 render(inner, frame - clip.start + clip.offset, scale, &mut nested, images);
                 let image = Arc::new(Image { width: nested.width, height: nested.height, pixels: nested.pixels });
+                return Some((clip, resolve(clip, time, scale, Some(image))?));
+            }
+            if let Some(path) = &clip.lottie {
+                let image = lottie::frame_image(path, time - clip.start as f32 + clip.offset as f32, scale)?;
                 return Some((clip, resolve(clip, time, scale, Some(image))?));
             }
             let image = match (&clip.text, &clip.media) {

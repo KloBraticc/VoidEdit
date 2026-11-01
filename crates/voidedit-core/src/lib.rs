@@ -1,6 +1,5 @@
 pub mod animation;
 pub mod expression;
-pub mod lottie;
 
 pub use animation::{AnimKind, Animation, Curve, Trigger};
 
@@ -465,6 +464,8 @@ pub struct Clip {
     pub rotation_y: Param,
     #[serde(default = "default_zero")]
     pub depth: Param,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lottie: Option<String>,
     #[serde(default)]
     pub animations: Vec<Animation>,
     #[serde(default)]
@@ -775,6 +776,7 @@ impl Project {
             Shape::Ellipse => ("Ellipse", [150, 90, 220], 400.0, 400.0),
         };
         Clip {
+            lottie: None,
             animations: Vec::new(),
             text_style: TextStyle::default(),
             audio_fx: Vec::new(),
