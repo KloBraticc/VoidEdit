@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = ["crates/voidedit-core", "crates/voidedit-render", "crates/voidedit-ui", "crates/voidedit-update", "apps/voidedit"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/KloBraticc/VoidEdit"
+
+[workspace.dependencies]
+voidedit-core = { path = "crates/voidedit-core" }
+voidedit-render = { path = "crates/voidedit-render" }
+voidedit-ui = { path = "crates/voidedit-ui" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rayon = "1"
+eframe = { version = "0.31", default-features = false, features = ["default_fonts", "wgpu", "x11", "wayland"] }
+rfd = "0.15"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+panic = "unwind"

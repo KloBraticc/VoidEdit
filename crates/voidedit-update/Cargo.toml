@@ -1,0 +1,11 @@
+[package]
+name = "voidedit-update"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde_json.workspace = true
+sha2 = "0.10"
+self-replace = "1"
+ureq = { version = "2", features = ["json"] }
