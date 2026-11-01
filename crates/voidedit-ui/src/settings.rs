@@ -132,6 +132,24 @@ pub fn trim_memory() {
 pub fn trim_memory() {}
 
 #[cfg(windows)]
+pub fn is_maximized() -> bool {
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn GetActiveWindow() -> *mut core::ffi::c_void;
+        fn IsZoomed(window: *mut core::ffi::c_void) -> i32;
+    }
+    unsafe {
+        let window = GetActiveWindow();
+        !window.is_null() && IsZoomed(window) != 0
+    }
+}
+
+#[cfg(not(windows))]
+pub fn is_maximized() -> bool {
+    false
+}
+
+#[cfg(windows)]
 pub fn set_rounded(rounded: bool) {
     const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
     let preference: i32 = if rounded { 2 } else { 1 };

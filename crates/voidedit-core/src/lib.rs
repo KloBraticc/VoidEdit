@@ -1,6 +1,49 @@
+pub mod animation;
 pub mod expression;
+pub mod lottie;
+
+pub use animation::{AnimKind, Animation, Curve, Trigger};
 
 use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TextStyle {
+    pub font: String,
+    pub outline_color: [u8; 3],
+    pub background_color: [u8; 3],
+    pub gradient: Option<[u8; 3]>,
+    pub spacing: f32,
+    pub line_height: f32,
+    pub align: u8,
+    pub bold: f32,
+    pub slant: f32,
+    pub glow: f32,
+    pub glow_color: [u8; 3],
+    pub wave: f32,
+    pub wave_speed: f32,
+    pub uppercase: bool,
+}
+
+impl Default for TextStyle {
+    fn default() -> Self {
+        Self { font: String::new(), outline_color: [0, 0, 0], background_color: [0, 0, 0], gradient: None, spacing: 0.0, line_height: 1.0, align: 1, bold: 0.0, slant: 0.0, glow: 0.0, glow_color: [150, 100, 235], wave: 0.0, wave_speed: 6.0, uppercase: false }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MotionBlur {
+    pub enabled: bool,
+    pub samples: u32,
+    pub shutter: f32,
+}
+
+impl Default for MotionBlur {
+    fn default() -> Self {
+        Self { enabled: false, samples: 8, shutter: 0.5 }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Ease {
@@ -423,6 +466,10 @@ pub struct Clip {
     #[serde(default = "default_zero")]
     pub depth: Param,
     #[serde(default)]
+    pub animations: Vec<Animation>,
+    #[serde(default)]
+    pub text_style: TextStyle,
+    #[serde(default)]
     pub audio_fx: Vec<voidedit_audio::Effect>,
     #[serde(default)]
     pub spatial: voidedit_audio::Spatial,
@@ -516,12 +563,15 @@ pub struct Project {
     #[serde(default)]
     pub markers: Vec<u32>,
     #[serde(default)]
+    pub motion_blur: MotionBlur,
+    #[serde(default)]
     pub master_fx: Vec<voidedit_audio::Effect>,
 }
 
 impl Default for Project {
     fn default() -> Self {
         Self {
+            motion_blur: MotionBlur::default(),
             master_fx: Vec::new(),
             width: 1920,
             height: 1080,
@@ -722,6 +772,8 @@ impl Project {
             Shape::Ellipse => ("Ellipse", [150, 90, 220], 400.0, 400.0),
         };
         Clip {
+            animations: Vec::new(),
+            text_style: TextStyle::default(),
             audio_fx: Vec::new(),
             spatial: voidedit_audio::Spatial::default(),
             name: format!("{name} {index}"),

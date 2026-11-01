@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use ab_glyph::{Font, FontRef, FontVec, ScaleFont};
+use ab_glyph::{Font, FontArc, FontVec, ScaleFont};
+use voidedit_core::TextStyle;
 use rayon::prelude::*;
 use voidedit_core::{Blend, Clip, Effect, MaskShape, Project, Shape, TrackKind, Transition};
 
@@ -468,11 +469,6 @@ fn box_line(input: &[u8], output: &mut [u8], count: usize, channels: usize, radi
     }
 }
 
-fn font() -> Option<&'static FontRef<'static>> {
-    static LOADED: OnceLock<Option<FontRef<'static>>> = OnceLock::new();
-    LOADED.get_or_init(|| FontRef::try_from_slice(FONT).ok()).as_ref()
-}
-
 const FALLBACK_FONTS: [&str; 16] = [
     "C:/Windows/Fonts/segoeui.ttf",
     "C:/Windows/Fonts/msyh.ttc",
@@ -515,7 +511,18 @@ fn draw_glyph(font: &impl Font, c: char, size: f32, pen: f32, baseline: f32, wid
     scaled.h_advance(id)
 }
 
-fn advance_of(font: &FontRef<'static>, c: char, size: f32) -> f32 {
+fn default_font() -> Option<&'static FontArc> {
+    static LOADED: OnceLock<Option<FontArc>> = OnceLock::new();
+    LOADED.get_or_init(|| FontArc::try_from_slice(FONT).ok()).as_ref()
+}
+
+fn custom_font(path: &str) -> Option<FontArc> {
+    static LOADED: OnceLock<Mutex<HashMap<String, Option<FontArc>>>> = OnceLock::new();
+    let mut cache = LOADED.get_or_init(Default::default).lock().ok()?;
+    cache.entry(path.to_string()).or_insert_with(|| std::fs::read(path).ok().and_then(|bytes| FontVec::try_from_vec_and_index(bytes, 0).ok()).map(FontArc::new)).clone()
+}
+
+fn advance_of(font: &FontArc, c: char, size: f32) -> f32 {
     let id = font.glyph_id(c);
     if id.0 != 0 || c.is_whitespace() {
         return font.as_scaled(size).h_advance(id);
@@ -523,60 +530,149 @@ fn advance_of(font: &FontRef<'static>, c: char, size: f32) -> f32 {
     fallback_fonts().iter().find(|other| other.glyph_id(c).0 != 0).map_or(size / 2.0, |other| other.as_scaled(size).h_advance(other.glyph_id(c)))
 }
 
+fn dilate(alpha: &[u8], width: usize, height: usize, radius: i64) -> Vec<u8> {
+    let mut wide = vec![0u8; alpha.len()];
+    for py in 0..height as i64 {
+        for px in 0..width as i64 {
+            let mut best = 0u8;
+            for dy in -radius..=radius {
+                for dx in -radius..=radius {
+                    let (nx, ny) = (px + dx, py + dy);
+                    if dx * dx + dy * dy <= radius * radius && nx >= 0 && ny >= 0 && (nx as usize) < width && (ny as usize) < height {
+                        best = best.max(alpha[ny as usize * width + nx as usize]);
+                    }
+                }
+            }
+            wide[py as usize * width + px as usize] = best;
+        }
+    }
+    wide
+}
+
+fn blur_alpha(alpha: &[u8], width: usize, height: usize, radius: usize) -> Vec<u8> {
+    let run = |source: &[u8], step: usize, lines: usize, length: usize, stride: usize| {
+        let mut out = vec![0u8; source.len()];
+        for line in 0..lines {
+            let at = |index: usize| source[line * stride + index * step] as u32;
+            let mut sum = 0u32;
+            for index in 0..length {
+                sum += at(index);
+                if index > 2 * radius {
+                    sum -= at(index - 2 * radius - 1);
+                }
+                if index >= radius {
+                    out[line * stride + (index - radius) * step] = (sum / (2 * radius as u32 + 1)) as u8;
+                }
+            }
+        }
+        out
+    };
+    let first = run(alpha, 1, height, width, width);
+    run(&first, width, width, height, 1)
+}
+
 pub fn text_image(text: &str, size: f32, color: [u8; 3], stroke: f32, background: bool) -> Option<Image> {
-    let font = font()?;
+    styled_text_image(text, size, color, stroke, background, &TextStyle::default(), 0.0)
+}
+
+pub fn styled_text_image(text: &str, size: f32, color: [u8; 3], stroke: f32, background: bool, style: &TextStyle, seconds: f32) -> Option<Image> {
+    let chosen = (!style.font.is_empty()).then(|| custom_font(&style.font)).flatten();
+    let font = chosen.as_ref().or_else(|| default_font())?;
     let size = size.clamp(4.0, 800.0);
     let scaled = font.as_scaled(size);
+    let upper;
+    let text = if style.uppercase {
+        upper = text.to_uppercase();
+        upper.as_str()
+    } else {
+        text
+    };
     let lines: Vec<&str> = text.split('\n').collect();
-    let line_height = scaled.height() + scaled.line_gap();
-    let measure = |line: &str| line.chars().map(|c| advance_of(font, c, size)).sum::<f32>();
-    let width = (lines.iter().map(|line| measure(line)).fold(1.0f32, f32::max).ceil() as usize + 2).min(8192);
-    let height = ((line_height * lines.len() as f32).ceil() as usize + 2).min(8192);
+    let line_height = (scaled.height() + scaled.line_gap()) * style.line_height.clamp(0.3, 4.0);
+    let measure = |line: &str| line.chars().map(|c| advance_of(font, c, size) + style.spacing).sum::<f32>();
+    let stroke = stroke.min(32.0);
+    let pad = (stroke + style.bold.min(16.0) + style.glow.min(64.0) * 1.5 + style.wave.abs().min(200.0)).ceil() + (style.slant.abs().min(1.0) * size).ceil();
+    let content = lines.iter().map(|line| measure(line)).fold(1.0f32, f32::max).max(1.0);
+    let width = ((content + pad * 2.0).ceil() as usize + 2).min(8192);
+    let height = ((line_height * lines.len() as f32 + pad * 2.0).ceil() as usize + 2).min(8192);
     let mut pixels = vec![0u8; width * height * 4];
-    for chunk in pixels.chunks_exact_mut(4) {
-        chunk[..3].copy_from_slice(&color);
-    }
+    let mut index = 0usize;
     for (row, line) in lines.iter().enumerate() {
-        let mut pen = (width as f32 - measure(line)) / 2.0;
-        let baseline = scaled.ascent() + row as f32 * line_height;
+        let free = content - measure(line);
+        let mut pen = pad + match style.align {
+            0 => 0.0,
+            2 => free,
+            _ => free / 2.0,
+        };
+        let baseline = pad + scaled.ascent() + row as f32 * line_height;
         for c in line.chars() {
+            let lift = style.wave * ((index as f32 * 0.6) + seconds * style.wave_speed).sin();
+            let line_y = baseline + lift;
             if font.glyph_id(c).0 != 0 || c.is_whitespace() {
-                pen += draw_glyph(font, c, size, pen, baseline, width, height, &mut pixels);
+                pen += draw_glyph(font, c, size, pen, line_y, width, height, &mut pixels);
             } else if let Some(other) = fallback_fonts().iter().find(|other| other.glyph_id(c).0 != 0) {
-                pen += draw_glyph(other, c, size, pen, baseline, width, height, &mut pixels);
+                pen += draw_glyph(other, c, size, pen, line_y, width, height, &mut pixels);
             } else {
                 pen += size / 2.0;
             }
+            pen += style.spacing;
+            index += 1;
         }
     }
-    if stroke > 0.0 {
-        let radius = stroke.min(32.0) as i64;
-        let source = pixels.clone();
-        for py in 0..height as i64 {
-            for px in 0..width as i64 {
-                let start = (py as usize * width + px as usize) * 4;
-                if source[start + 3] > 128 {
-                    continue;
-                }
-                let near = (-radius..=radius).any(|dy| {
-                    (-radius..=radius).any(|dx| {
-                        let (nx, ny) = (px + dx, py + dy);
-                        nx >= 0 && ny >= 0 && (nx as usize) < width && (ny as usize) < height && source[(ny as usize * width + nx as usize) * 4 + 3] > 128
-                    })
-                });
-                if near {
-                    pixels[start..start + 4].copy_from_slice(&[0, 0, 0, 255]);
+    let mut alpha: Vec<u8> = pixels.chunks_exact(4).map(|pixel| pixel[3]).collect();
+    if style.slant != 0.0 {
+        let mut slanted = vec![0u8; alpha.len()];
+        for y in 0..height {
+            let offset = (style.slant * (height as f32 / 2.0 - y as f32)) as i64;
+            for x in 0..width {
+                let target = x as i64 + offset;
+                if target >= 0 && (target as usize) < width {
+                    slanted[y * width + target as usize] = alpha[y * width + x];
                 }
             }
         }
+        alpha = slanted;
     }
-    if background {
-        for pixel in pixels.chunks_exact_mut(4) {
-            let alpha = pixel[3] as f32 / 255.0;
-            for channel in &mut pixel[..3] {
-                *channel = (*channel as f32 * alpha) as u8;
+    if style.bold >= 1.0 {
+        alpha = dilate(&alpha, width, height, style.bold.min(16.0) as i64);
+    }
+    let outline = if stroke >= 1.0 { dilate(&alpha, width, height, stroke as i64) } else { Vec::new() };
+    let halo = if style.glow >= 1.0 { blur_alpha(&if outline.is_empty() { alpha.clone() } else { outline.clone() }, width, height, style.glow.min(64.0) as usize) } else { Vec::new() };
+    for y in 0..height {
+        let fill = match style.gradient {
+            Some(bottom) => {
+                let t = y as f32 / height.max(1) as f32;
+                [0, 1, 2].map(|channel| (color[channel] as f32 + (bottom[channel] as f32 - color[channel] as f32) * t) as u8)
             }
-            pixel[3] = pixel[3].max(170);
+            None => color,
+        };
+        for x in 0..width {
+            let at = y * width + x;
+            let pixel = &mut pixels[at * 4..at * 4 + 4];
+            let (mut rgb, mut out) = ([0.0f32; 3], if background { 170.0 / 255.0 } else { 0.0 });
+            if background {
+                rgb = style.background_color.map(|channel| channel as f32);
+            }
+            let mut over = |source: [u8; 3], amount: f32| {
+                let result = amount + out * (1.0 - amount);
+                if result > 0.0 {
+                    for channel in 0..3 {
+                        rgb[channel] = (source[channel] as f32 * amount + rgb[channel] * out * (1.0 - amount)) / result;
+                    }
+                }
+                out = result;
+            };
+            if let Some(amount) = halo.get(at) {
+                over(style.glow_color, (*amount as f32 / 255.0 * 1.6).min(1.0));
+            }
+            if let Some(amount) = outline.get(at) {
+                over(style.outline_color, *amount as f32 / 255.0);
+            }
+            over(fill, alpha[at] as f32 / 255.0);
+            pixel[0] = rgb[0] as u8;
+            pixel[1] = rgb[1] as u8;
+            pixel[2] = rgb[2] as u8;
+            pixel[3] = (out * 255.0) as u8;
         }
     }
     Some(Image { width, height, pixels })
@@ -881,13 +977,72 @@ pub fn wanted_frame(project: &Project, clip: &Clip, frame: u32) -> bool {
 }
 
 pub fn render(project: &Project, frame: u32, scale: f32, target: &mut Frame, images: &dyn Fn(&str) -> Option<Arc<Image>>) {
+    let blur = &project.motion_blur;
+    let moving = project.clips.iter().any(|clip| !clip.animations.is_empty() || !clip.x.keys.is_empty() || !clip.y.keys.is_empty() || !clip.scale.keys.is_empty() || !clip.rotation.keys.is_empty());
+    if !blur.enabled || !moving || blur.shutter <= 0.0 {
+        render_at(project, frame, frame as f32, scale, target, images);
+        return;
+    }
+    let samples = if scale < 1.0 { blur.samples.clamp(2, 4) } else { blur.samples.clamp(2, 32) };
+    let mut total: Vec<u32> = Vec::new();
+    for sample in 0..samples {
+        let time = frame as f32 + sample as f32 / samples as f32 * blur.shutter.min(1.0);
+        render_at(project, frame, time, scale, target, images);
+        total.resize(target.pixels.len(), 0);
+        for (sum, value) in total.iter_mut().zip(&target.pixels) {
+            *sum += *value as u32;
+        }
+    }
+    for (value, sum) in target.pixels.iter_mut().zip(&total) {
+        *value = (*sum / samples) as u8;
+    }
+}
+
+pub fn upscale(source: &Frame, width: usize, height: usize, sharpen: f32, target: &mut Frame) {
+    fn weight(x: f32) -> f32 {
+        let x = x.abs();
+        if x < 1.0 {
+            1.5 * x * x * x - 2.5 * x * x + 1.0
+        } else if x < 2.0 {
+            -0.5 * x * x * x + 2.5 * x * x - 4.0 * x + 2.0
+        } else {
+            0.0
+        }
+    }
+    target.width = width;
+    target.height = height;
+    target.pixels.resize(width * height * 4, 255);
+    let (source_width, source_height) = (source.width.max(1) as i64, source.height.max(1) as i64);
+    let at = |x: i64, y: i64, channel: usize| source.pixels[(y.clamp(0, source_height - 1) * source_width + x.clamp(0, source_width - 1)) as usize * 4 + channel] as f32;
+    target.pixels.par_chunks_mut(width * 4).enumerate().for_each(|(row, line)| {
+        let v = (row as f32 + 0.5) * source_height as f32 / height as f32 - 0.5;
+        let (base_y, fraction_y) = (v.floor() as i64, v - v.floor());
+        for (column, pixel) in line.chunks_exact_mut(4).enumerate() {
+            let u = (column as f32 + 0.5) * source_width as f32 / width as f32 - 0.5;
+            let (base_x, fraction_x) = (u.floor() as i64, u - u.floor());
+            for channel in 0..3 {
+                let mut value = 0.0;
+                for dy in -1..=2i64 {
+                    for dx in -1..=2i64 {
+                        value += at(base_x + dx, base_y + dy, channel) * weight(dx as f32 - fraction_x) * weight(dy as f32 - fraction_y);
+                    }
+                }
+                let soft = at(base_x, base_y, channel) * 0.25 + at(base_x + 1, base_y, channel) * 0.25 + at(base_x, base_y + 1, channel) * 0.25 + at(base_x + 1, base_y + 1, channel) * 0.25;
+                pixel[channel] = (value + (value - soft) * sharpen).clamp(0.0, 255.0) as u8;
+            }
+            pixel[3] = 255;
+        }
+    });
+}
+
+fn render_at(project: &Project, frame: u32, time: f32, scale: f32, target: &mut Frame, images: &dyn Fn(&str) -> Option<Arc<Image>>) {
     let scale = scale.clamp(0.05, 1.0);
     let width = ((project.width as f32 * scale) as usize).max(1);
     let height = ((project.height as f32 * scale) as usize).max(1);
     target.width = width;
     target.height = height;
     target.pixels.resize(width * height * 4, 255);
-    let layers = layers(project, frame, scale, images);
+    let layers = layers_at(project, frame, time, scale, images);
     let background = project.background.map(|channel| channel as f32);
     target.pixels.par_chunks_mut(width * 4).enumerate().for_each(|(row, line)| {
         let py = row as f32 + 0.5;
@@ -911,12 +1066,18 @@ pub fn render(project: &Project, frame: u32, scale: f32, target: &mut Frame, ima
 }
 
 pub fn layers(project: &Project, frame: u32, scale: f32, images: &dyn Fn(&str) -> Option<Arc<Image>>) -> Vec<Resolved> {
+    layers_at(project, frame, frame as f32, scale, images)
+}
+
+fn layers_at(project: &Project, frame: u32, time: f32, scale: f32, images: &dyn Fn(&str) -> Option<Arc<Image>>) -> Vec<Resolved> {
     let scale = scale.clamp(0.05, 1.0);
-    let time = frame as f32;
     let mut order: Vec<&Clip> = project.clips.iter().filter(|clip| wanted_frame(project, clip, frame)).collect();
     order.sort_by_key(|clip| clip.track);
-    order
-        .into_iter()
+    let moved: Vec<std::borrow::Cow<Clip>> = order.into_iter().map(|clip| if clip.animations.is_empty() { std::borrow::Cow::Borrowed(clip) } else { std::borrow::Cow::Owned(clip.animated(time)) }).collect();
+    let seconds = time / project.fps.max(1) as f32;
+    moved
+        .iter()
+        .map(|clip| clip.as_ref())
         .filter_map(|clip| {
             if let Some(inner) = &clip.nested {
                 let mut nested = Frame::default();
@@ -930,9 +1091,9 @@ pub fn layers(project: &Project, frame: u32, scale: f32, images: &dyn Fn(&str) -
                     let span = (clip.end - clip.start).max(1) as f32 * 0.7;
                     let shown = (((time - clip.start as f32) / span).clamp(0.0, 1.0) * length as f32).ceil() as usize;
                     let visible: String = text.chars().take(shown.max(1)).collect();
-                    Some(Arc::new(text_image(&visible, clip.text_size, clip.color, clip.text_stroke, clip.text_background)?))
+                    Some(Arc::new(styled_text_image(&visible, clip.text_size, clip.color, clip.text_stroke, clip.text_background, &clip.text_style, seconds)?))
                 }
-                (Some(text), _) => Some(Arc::new(text_image(text, clip.text_size, clip.color, clip.text_stroke, clip.text_background)?)),
+                (Some(text), _) => Some(Arc::new(styled_text_image(text, clip.text_size, clip.color, clip.text_stroke, clip.text_background, &clip.text_style, seconds)?)),
                 (None, Some(path)) => Some(images(&voidedit_core::media_key(path, clip.media_seconds(frame, project.fps)))?),
                 (None, None) => None,
             };

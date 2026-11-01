@@ -11,11 +11,12 @@ use std::time::Instant;
 
 use eframe::egui::{self, Color32, Pos2, Rect, RichText, Sense, Stroke, Vec2};
 use settings::Settings;
-use voidedit_core::{timecode, Clip, Ease, Effect, History, MaskShape, Param, Project, Shape, TrackKind, BLENDS, EFFECT_NAMES, LOOKS, TRANSITIONS};
+use voidedit_core::{AnimKind, Animation, Curve, Trigger, timecode, Clip, Ease, Effect, History, MaskShape, Param, Project, Shape, TrackKind, BLENDS, EFFECT_NAMES, LOOKS, TRANSITIONS};
 use voidedit_export::{audio_clips, export_with, ExportFormat, ExportOptions, Progress};
 use voidedit_media::{decode_now, mono_samples, track_point, waveform, Audio, FrameWant, Frames, Library};
 use voidedit_render::{render, Frame};
 
+const SNAP_PIXELS: f32 = 8.0;
 const HIT_CAPTION: usize = 2;
 const MAX_TEXTURE_SIDE: u32 = 2048;
 const HEADER_WIDTH: f32 = 240.0;
@@ -107,6 +108,8 @@ pub struct App {
     show_strip: bool,
     show_inspector: bool,
     bin: usize,
+    page: u8,
+    page_changed: Instant,
     applied_round: Option<bool>,
     wallpaper_light: f32,
     show_home: bool,
@@ -127,6 +130,7 @@ pub struct App {
     drawing_mask: bool,
     captioning: Option<Arc<Mutex<CaptionJob>>>,
     gizmo: Option<Gizmo>,
+    gizmo_raw: (f32, f32),
     thumbs: Arc<Mutex<HashMap<String, egui::ColorImage>>>,
     thumb_textures: HashMap<String, egui::TextureHandle>,
     picking_track: bool,
@@ -201,6 +205,7 @@ impl App {
             drawing_mask: false,
             captioning: None,
             gizmo: None,
+            gizmo_raw: (0.0, 0.0),
             thumbs: Arc::default(),
             thumb_textures: HashMap::new(),
             picking_track: false,
@@ -231,6 +236,8 @@ impl App {
             show_strip: true,
             show_inspector: true,
             bin: 0,
+            page: 255,
+            page_changed: Instant::now(),
             applied_round: None,
             wallpaper_light: 0.5,
             show_home: true,
@@ -344,6 +351,46 @@ impl App {
         }
     }
 
+    fn page_transition(&mut self, root: &mut egui::Ui, ctx: &egui::Context) {
+        const SECONDS: f32 = 0.32;
+        const TRAVEL: f32 = 26.0;
+        let page = if self.show_home { 0 } else if self.show_studio { 1 } else { 2 };
+        if page != self.page {
+            self.page = page;
+            self.page_changed = Instant::now();
+        }
+        let raw = if self.settings.animations { self.page_changed.elapsed().as_secs_f32() / SECONDS } else { 1.0 };
+        let eased = 1.0 - (1.0 - raw.min(1.0)).powi(3);
+        let shift = (1.0 - eased) * TRAVEL;
+        ctx.set_transform_layer(egui::LayerId::background(), egui::emath::TSTransform::from_translation(Vec2::new(0.0, shift)));
+        if raw < 1.0 {
+            root.multiply_opacity(eased);
+            ctx.request_repaint();
+        }
+    }
+
+    fn import_lottie(&mut self) {
+        let Some(path) = rfd::FileDialog::new().add_filter("Lottie or Bodymovin", &["json", "lottie"]).pick_file() else { return };
+        match std::fs::read_to_string(&path).map_err(|error| error.to_string()).and_then(|text| voidedit_core::lottie::import(&text)) {
+            Ok(report) => {
+                self.project = report.project;
+                self.committed = self.project.clone();
+                self.history = History::default();
+                self.path = None;
+                self.selected = None;
+                self.frame = 0;
+                self.show_home = false;
+                self.status = if report.skipped.is_empty() { format!("Imported {} layers", report.imported) } else { format!("Imported {} layers, skipped {}: {}", report.imported, report.skipped.len(), report.skipped.join(", ")) };
+            }
+            Err(error) => self.status = format!("Could not import: {error}"),
+        }
+    }
+
+    fn settings_accent(&self) -> Color32 {
+        let [r, g, b] = self.settings.accent;
+        Color32::from_rgb(r, g, b)
+    }
+
     fn shade(&self, amount: f32) -> Color32 {
         let [r, g, b] = self.settings.theme.card;
         let [x, y, z] = self.settings.theme.background;
@@ -354,7 +401,7 @@ impl App {
         if cfg!(windows) {
             let title = ui.interact(ui.max_rect(), egui::Id::new("title-drag"), Sense::click_and_drag());
             if title.double_clicked() {
-                let maximized = ui.input(|input| input.viewport().maximized.unwrap_or(false));
+                let maximized = settings::is_maximized();
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
             } else if title.drag_started() {
                 settings::drag_window(HIT_CAPTION);
@@ -369,7 +416,7 @@ impl App {
             if widgets::caption(ui, widgets::Caption::Close).clicked() {
                 context.send_viewport_cmd(egui::ViewportCommand::Close);
             }
-            let maximized = ui.input(|input| input.viewport().maximized.unwrap_or(false));
+            let maximized = settings::is_maximized();
             if widgets::caption(ui, if maximized { widgets::Caption::Restore } else { widgets::Caption::Maximize }).clicked() {
                 context.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
             }
@@ -383,7 +430,7 @@ impl App {
 
     fn window_edges(&self, ctx: &egui::Context) {
         const EDGE: f32 = 6.0;
-        if !cfg!(windows) || ctx.input(|input| input.viewport().maximized.unwrap_or(false)) {
+        if !cfg!(windows) || settings::is_maximized() {
             return;
         }
         let Some(pointer) = ctx.input(|input| input.pointer.hover_pos()) else { return };
@@ -482,7 +529,7 @@ impl App {
 
     fn paint_background(&self, ctx: &egui::Context) {
         let painter = ctx.layer_painter(egui::LayerId::background());
-        let screen = ctx.content_rect();
+        let screen = ctx.content_rect().expand(40.0);
         let [r, g, b] = self.settings.theme.background;
         let alpha = if self.settings.backdrop == settings::Backdrop::None { 255 } else { 110 };
         if let Some((_, texture)) = &self.wallpaper {
@@ -1036,12 +1083,13 @@ impl App {
                 }
                 ui.menu_button(format!("{}  Menu", ph::LIST), |ui| {
                 ui.menu_button("File", |ui| {
-                    let items: [(&str, fn(&mut App)); 6] = [
+                    let items: [(&str, fn(&mut App)); 7] = [
                         ("New", App::new_project),
                         ("Open...", App::open),
                         ("Save", |app| app.save(false)),
                         ("Save As...", |app| app.save(true)),
                         ("Import Media...", App::import),
+                        ("Import Lottie...", App::import_lottie),
                         ("Export...", |app| app.show_export = true),
                     ];
                     for (label, action) in items {
@@ -1091,7 +1139,8 @@ impl App {
                 });
                 ui.menu_button("Captions", |ui| {
                     let current = voidedit_speech::LANGUAGES.iter().find(|(_, code)| *code == self.settings.caption_language).map_or("Detect automatically", |(name, _)| *name);
-                    egui::ComboBox::from_label("Spoken language").selected_text(current).height(320.0).show_ui(ui, |ui| {
+                    ui.label(RichText::new("Spoken language").small().weak());
+                egui::ComboBox::from_id_salt("caption-language").width(ui.available_width() - 8.0).selected_text(current).height(320.0).show_ui(ui, |ui| {
                         if ui.selectable_label(self.settings.caption_language == voidedit_speech::AUTO_DETECT, "Detect automatically").clicked() {
                             self.settings.caption_language = voidedit_speech::AUTO_DETECT.to_string();
                             self.settings.save();
@@ -1339,9 +1388,19 @@ impl App {
             if self.options.format != ExportFormat::Wav {
                 ui.add(egui::Slider::new(&mut self.options.scale, 0.1..=1.0).text("Resolution"));
                 let (width, height) = (self.project.width as f32 * self.options.scale, self.project.height as f32 * self.options.scale);
-                ui.label(RichText::new(format!("{} x {}", width as u32 & !1, height as u32 & !1)).weak());
+                let factor = if self.options.format == ExportFormat::Mp4 { self.options.upscale.max(1) } else { 1 };
+                ui.label(RichText::new(format!("{} x {}", (width as u32 * factor) & !1, (height as u32 * factor) & !1)).weak());
             }
             if self.options.format == ExportFormat::Mp4 {
+                ui.horizontal(|ui| {
+                    ui.label("Upscale");
+                    for factor in 1..=4u32 {
+                        ui.selectable_value(&mut self.options.upscale, factor, format!("{factor}x"));
+                    }
+                });
+                if self.options.upscale > 1 {
+                    ui.add(egui::Slider::new(&mut self.options.sharpen, 0.0..=1.5).text("Sharpen"));
+                }
                 ui.add(egui::Slider::new(&mut self.options.quality, 40.0..=10.0).text("Quality"));
             }
             go = ui.button("Export").clicked();
@@ -1557,15 +1616,25 @@ impl App {
         egui::ScrollArea::vertical().id_salt("studio-sfx").show_rows(ui, 28.0, matches.len(), |ui, rows| {
             for position in rows {
                 let info = &self.sfx[matches[position]];
+                let row = Rect::from_min_size(ui.cursor().min, Vec2::new(ui.available_width(), 28.0));
+                if ui.rect_contains_pointer(row) {
+                    ui.painter().rect_filled(row, 4.0_f32, Color32::WHITE.gamma_multiply(0.05));
+                }
                 ui.horizontal(|ui| {
+                    ui.set_width(row.width());
+                    ui.spacing_mut().item_spacing.x = 2.0;
                     if widgets::pill(ui, ph::PLAY, "", false, accent).on_hover_text("Preview").clicked() {
                         preview = Some(info.id.clone());
                     }
                     if widgets::pill(ui, ph::PLUS, "", false, accent).on_hover_text("Add at the playhead").clicked() {
                         add = Some((info.id.clone(), info.name.clone()));
                     }
+                    ui.add_space(8.0);
                     ui.label(&info.name);
-                    ui.label(RichText::new(info.category).small().weak());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.add_space(10.0);
+                        ui.label(RichText::new(info.category).small().weak());
+                    });
                 });
             }
         });
@@ -1724,10 +1793,10 @@ impl App {
                     }
                 });
                 ui.add_space(6.0);
-                if ui.add(egui::Button::new("Generate from selected clip").min_size(Vec2::new(ui.available_width(), 36.0))).on_hover_text("Downloads a 144 MB speech model the first time").clicked() {
+                if ui.add(egui::Button::new(RichText::new("Generate from selected clip").color(Color32::WHITE)).fill(self.accent()).min_size(Vec2::new(ui.available_width(), 32.0))).on_hover_text("Downloads a 144 MB speech model the first time").clicked() {
                     self.generate_captions();
                 }
-                if ui.add(egui::Button::new("Import SRT file").min_size(Vec2::new(ui.available_width(), 36.0))).clicked() {
+                if ui.add(egui::Button::new("Import SRT file").min_size(Vec2::new(ui.available_width(), 32.0))).clicked() {
                     self.import_captions();
                 }
             }
@@ -1926,19 +1995,15 @@ impl App {
         let Some(clip) = selected.and_then(|index| self.project.clips.get_mut(index)) else { return };
         ui.add(egui::TextEdit::singleline(&mut clip.name).desired_width(f32::INFINITY));
         egui::ScrollArea::vertical().show(ui, |ui| {
-            if let Some(text) = &mut clip.text {
+            if clip.text.is_some() {
                 section(ui, tab, "Text", true, |ui| {
-                    ui.add(egui::TextEdit::multiline(text).desired_rows(2).desired_width(f32::INFINITY));
-                    ui.add(egui::Slider::new(&mut clip.text_size, 8.0..=400.0).text("Size"));
-                    ui.add(egui::Slider::new(&mut clip.text_stroke, 0.0..=16.0).text("Outline"));
-                    ui.checkbox(&mut clip.text_background, "Background");
-                    ui.checkbox(&mut clip.typewriter, "Typewriter animation");
-                    ui.horizontal(|ui| {
-                        ui.label("Color");
-                        ui.color_edit_button_srgb(&mut clip.color);
-                    });
+                    if let Some(text) = &mut clip.text {
+                        ui.add(egui::TextEdit::multiline(text).desired_rows(2).desired_width(f32::INFINITY));
+                    }
+                    text_controls(ui, clip);
                 });
             }
+            section(ui, tab, "Animations", true, |ui| animation_controls(ui, clip, accent));
             section(ui, tab, "Motion", true, |ui| {
                 Self::param(ui, accent, "Position X", &mut clip.x, frame, 1.0);
                 Self::param(ui, accent, "Position Y", &mut clip.y, frame, 1.0);
@@ -2198,16 +2263,14 @@ impl App {
             let frames = self.frames.clone();
             render(&self.project, self.frame, scale, &mut self.preview, &|key| frames.latest(key));
             let image = egui::ColorImage::from_rgba_unmultiplied([self.preview.width, self.preview.height], &self.preview.pixels);
-            match &mut self.texture {
-                Some(texture) => texture.set(image, egui::TextureOptions::LINEAR),
-                None => self.texture = Some(ui.ctx().load_texture("program", image, egui::TextureOptions::LINEAR)),
-            }
+            self.texture = Some(ui.ctx().load_texture("program", image, egui::TextureOptions::LINEAR));
             self.rendered = Some((self.frame, self.project.clone(), scale, generation));
         }
         ui.allocate_ui_with_layout(area, egui::Layout::centered_and_justified(egui::Direction::TopDown), |ui| {
             let shown = self.texture.as_ref().map(egui::TextureHandle::id);
             if let Some(id) = shown {
-                let picture = ui.add(egui::Image::new((id, size)).fit_to_exact_size(size).sense(Sense::click_and_drag()));
+                let picture = ui.allocate_rect(Rect::from_center_size(ui.max_rect().center(), size), Sense::click_and_drag());
+                ui.painter().image(id, picture.rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
                 self.preview_overlay(ui, &picture);
                 if self.picking_track && picture.clicked() {
                     if let (Some(position), Some(index)) = (picture.interact_pointer_pos(), self.selected) {
@@ -2323,8 +2386,37 @@ impl App {
             let clip = &mut self.project.clips[index];
             match self.gizmo {
                 Some(Gizmo::Move) => {
-                    clip.x.set(frame, center_x + delta.x);
-                    clip.y.set(frame, center_y + delta.y);
+                    if picture.drag_started() {
+                        self.gizmo_raw = (center_x, center_y);
+                    }
+                    self.gizmo_raw.0 += delta.x;
+                    self.gizmo_raw.1 += delta.y;
+                    let (mut next_x, mut next_y) = self.gizmo_raw;
+                    if self.settings.snapping && !ui.input(|input| input.modifiers.alt) {
+                        let reach = SNAP_PIXELS / ratio.max(0.001);
+                        let size = clip.scale.at(time) / 100.0;
+                        let (half_w, half_h) = (clip.width * size / 2.0, clip.height * size / 2.0);
+                        let (frame_w, frame_h) = (self.project.width as f32, self.project.height as f32);
+                        let snap = |value: f32, half: f32, length: f32| {
+                            [(length / 2.0, length / 2.0), (half, 0.0), (length - half, length), (length / 2.0 + half, length / 2.0), (length / 2.0 - half, length / 2.0)]
+                                .into_iter()
+                                .filter(|(target, _)| (value - target).abs() < reach)
+                                .min_by(|a, b| (value - a.0).abs().total_cmp(&(value - b.0).abs()))
+                        };
+                        let painter = ui.painter();
+                        let guide = Stroke::new(1.0_f32, self.settings_accent());
+                        if let Some((target, line)) = snap(next_x, half_w, frame_w) {
+                            next_x = target;
+                            painter.line_segment([to_screen(line, 0.0), to_screen(line, frame_h)], guide);
+                        }
+                        if let Some((target, line)) = snap(next_y, half_h, frame_h) {
+                            next_y = target;
+                            painter.line_segment([to_screen(0.0, line), to_screen(frame_w, line)], guide);
+                        }
+                    }
+                    let clip = &mut self.project.clips[index];
+                    clip.x.set(frame, next_x);
+                    clip.y.set(frame, next_y);
                 }
                 Some(Gizmo::Scale { distance, scale }) => {
                     if let Some(position) = pointer {
@@ -2374,6 +2466,13 @@ impl App {
                 ui.spacing_mut().slider_width = 120.0;
                 ui.add(egui::Slider::new(&mut self.zoom, 0.2..=60.0).logarithmic(true).show_value(false));
                 widgets::pill(ui, ph::MAGNIFYING_GLASS, "", false, accent);
+                let blur = self.project.motion_blur.enabled;
+                ui.menu_button(format!("{}  Motion blur{}", ph::WIND, if blur { " on" } else { "" }), |ui| {
+                    ui.checkbox(&mut self.project.motion_blur.enabled, "Enable motion blur");
+                    ui.add(egui::Slider::new(&mut self.project.motion_blur.shutter, 0.05..=1.0).text("Shutter"));
+                    ui.add(egui::Slider::new(&mut self.project.motion_blur.samples, 2..=32).text("Export samples"));
+                    ui.label(RichText::new("The preview uses up to 4 samples, exports use all of them").small().weak());
+                });
                 let snapping = self.settings.snapping;
                 if widgets::pill(ui, ph::MAGNET, "Snap", snapping, accent).on_hover_text("Clips snap to each other, the playhead and markers").clicked() {
                     self.settings.snapping = !snapping;
@@ -2768,6 +2867,190 @@ impl App {
         let head = to_x(self.frame as f32);
         full.line_segment([Pos2::new(head, rect.top()), Pos2::new(head, rect.bottom())], Stroke::new(1.5_f32, accent));
         full.circle_filled(Pos2::new(head, rect.top() + 6.0), 5.0, accent);
+        let bar = Rect::from_min_max(Pos2::new(lane, rect.bottom() - 12.0), rect.max);
+        let seen = (rect.right() - lane) / zoom;
+        let total = (self.project.end_frame() as f32 * 1.1 + 30.0).max(scroll + seen);
+        let track = ui.interact(bar, egui::Id::new("timeline-scrollbar"), Sense::click_and_drag());
+        let thumb_width = (seen / total * bar.width()).clamp(30.0, bar.width());
+        if let Some(pointer) = track.interact_pointer_pos() {
+            let ratio = ((pointer.x - bar.left() - thumb_width / 2.0) / (bar.width() - thumb_width).max(1.0)).clamp(0.0, 1.0);
+            self.scroll = ratio * (total - seen).max(0.0);
+        }
+        let travel = scroll / (total - seen).max(1.0);
+        let thumb = Rect::from_min_size(Pos2::new(bar.left() + travel.clamp(0.0, 1.0) * (bar.width() - thumb_width), bar.top() + 2.0), Vec2::new(thumb_width, 8.0));
+        ui.painter().rect_filled(bar, 0.0_f32, self.shade(0.8));
+        ui.painter().rect_filled(thumb, 4.0_f32, if track.hovered() || track.dragged() { Color32::from_gray(150) } else { Color32::from_gray(95) });
+    }
+}
+
+fn system_fonts() -> &'static [(String, String)] {
+    static FONTS: std::sync::OnceLock<Vec<(String, String)>> = std::sync::OnceLock::new();
+    FONTS.get_or_init(|| {
+        let mut fonts = Vec::new();
+        let home = std::env::var("HOME").unwrap_or_default();
+        let windows = std::env::var("WINDIR").map(|folder| format!("{folder}/Fonts")).unwrap_or_default();
+        let local = std::env::var("LOCALAPPDATA").map(|folder| format!("{folder}/Microsoft/Windows/Fonts")).unwrap_or_default();
+        let mut folders = vec![windows, local, "/usr/share/fonts".to_string(), "/Library/Fonts".to_string(), "/System/Library/Fonts".to_string(), format!("{home}/.fonts"), format!("{home}/Library/Fonts")];
+        while let Some(folder) = folders.pop() {
+            let Ok(entries) = std::fs::read_dir(&folder) else { continue };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    folders.push(path.to_string_lossy().into_owned());
+                } else if path.extension().is_some_and(|extension| matches!(extension.to_string_lossy().to_lowercase().as_str(), "ttf" | "otf" | "ttc")) {
+                    fonts.push((path.file_stem().map_or_else(String::new, |stem| stem.to_string_lossy().into_owned()), path.to_string_lossy().into_owned()));
+                }
+            }
+        }
+        fonts.sort();
+        fonts
+    })
+}
+
+fn text_controls(ui: &mut egui::Ui, clip: &mut Clip) {
+    let style = &mut clip.text_style;
+    let current = std::path::Path::new(&style.font).file_stem().map_or_else(|| "Default".to_string(), |stem| stem.to_string_lossy().into_owned());
+    ui.horizontal(|ui| {
+        ui.label("Font");
+        egui::ComboBox::from_id_salt("text-font").width(150.0).selected_text(current).height(320.0).show_ui(ui, |ui| {
+            if ui.selectable_label(style.font.is_empty(), "Default").clicked() {
+                style.font.clear();
+            }
+            for (name, path) in system_fonts() {
+                if ui.selectable_label(&style.font == path, name).clicked() {
+                    style.font = path.clone();
+                }
+            }
+        });
+        if ui.button("File").on_hover_text("Use your own font file").clicked() {
+            if let Some(path) = rfd::FileDialog::new().add_filter("Font", &["ttf", "otf", "ttc"]).pick_file() {
+                style.font = path.to_string_lossy().into_owned();
+            }
+        }
+    });
+    ui.add(egui::Slider::new(&mut clip.text_size, 8.0..=400.0).text("Size"));
+    ui.add(egui::Slider::new(&mut style.spacing, -20.0..=100.0).text("Letter spacing"));
+    ui.add(egui::Slider::new(&mut style.line_height, 0.5..=3.0).text("Line height"));
+    ui.add(egui::Slider::new(&mut style.bold, 0.0..=12.0).text("Bold"));
+    ui.add(egui::Slider::new(&mut style.slant, -0.6..=0.6).text("Slant"));
+    ui.horizontal(|ui| {
+        ui.label("Align");
+        for (value, icon) in [(0u8, ph::TEXT_ALIGN_LEFT), (1, ph::TEXT_ALIGN_CENTER), (2, ph::TEXT_ALIGN_RIGHT)] {
+            ui.selectable_value(&mut style.align, value, icon);
+        }
+        ui.checkbox(&mut style.uppercase, "Uppercase");
+    });
+    ui.horizontal(|ui| {
+        ui.label("Color");
+        ui.color_edit_button_srgb(&mut clip.color);
+        let mut gradient = style.gradient.is_some();
+        if ui.checkbox(&mut gradient, "Gradient").changed() {
+            style.gradient = gradient.then_some(clip.color);
+        }
+        if let Some(bottom) = &mut style.gradient {
+            ui.color_edit_button_srgb(bottom);
+        }
+    });
+    ui.horizontal(|ui| {
+        ui.add(egui::Slider::new(&mut clip.text_stroke, 0.0..=16.0).text("Outline"));
+        ui.color_edit_button_srgb(&mut style.outline_color);
+    });
+    ui.horizontal(|ui| {
+        ui.add(egui::Slider::new(&mut style.glow, 0.0..=40.0).text("Glow"));
+        ui.color_edit_button_srgb(&mut style.glow_color);
+    });
+    ui.horizontal(|ui| {
+        ui.checkbox(&mut clip.text_background, "Background");
+        ui.color_edit_button_srgb(&mut style.background_color);
+    });
+    ui.add(egui::Slider::new(&mut style.wave, 0.0..=80.0).text("Letter wave"));
+    ui.add(egui::Slider::new(&mut style.wave_speed, 0.0..=20.0).text("Wave speed"));
+    ui.checkbox(&mut clip.typewriter, "Typewriter");
+}
+
+fn saved_stacks() -> Vec<(String, std::path::PathBuf)> {
+    let Some(folder) = Settings::folder().map(|folder| folder.join("animations")) else { return Vec::new() };
+    let Ok(entries) = std::fs::read_dir(folder) else { return Vec::new() };
+    let mut stacks: Vec<(String, std::path::PathBuf)> = entries.flatten().map(|entry| entry.path()).filter(|path| path.extension().is_some_and(|extension| extension == "json")).map(|path| (path.file_stem().map_or_else(String::new, |stem| stem.to_string_lossy().into_owned()), path)).collect();
+    stacks.sort();
+    stacks
+}
+
+fn animation_controls(ui: &mut egui::Ui, clip: &mut Clip, accent: Color32) {
+    let length = clip.end.saturating_sub(clip.start).max(1);
+    ui.horizontal(|ui| {
+        ui.menu_button(format!("{}  Add preset", ph::SPARKLE), |ui| {
+            for (name, stack) in voidedit_core::animation::presets() {
+                if ui.button(name).clicked() {
+                    clip.animations.extend(stack);
+                    ui.close();
+                }
+            }
+            let saved = saved_stacks();
+            if !saved.is_empty() {
+                ui.separator();
+            }
+            for (name, path) in saved {
+                if ui.button(&name).clicked() {
+                    if let Some(stack) = std::fs::read_to_string(&path).ok().and_then(|text| serde_json::from_str::<Vec<Animation>>(&text).ok()) {
+                        clip.animations.extend(stack);
+                    }
+                    ui.close();
+                }
+            }
+        });
+        if ui.button(format!("{}  Add", ph::PLUS)).clicked() {
+            clip.animations.push(Animation::new(AnimKind::Fade, Trigger::In, Curve::EaseOut, 0, 15.min(length), 100.0));
+        }
+        if !clip.animations.is_empty() && ui.button(format!("{}  Save", ph::FLOPPY_DISK)).on_hover_text("Save this stack as a preset").clicked() {
+            let folder = Settings::folder().map(|folder| folder.join("animations"));
+            if let (Some(folder), Ok(text)) = (folder, serde_json::to_string_pretty(&clip.animations)) {
+                let _ = std::fs::create_dir_all(&folder);
+                let _ = std::fs::write(folder.join(format!("{}.json", clip.name.replace(['/', '\\', ':', '*', '?', '"', '<', '>', '|'], ""))), text);
+            }
+        }
+    });
+    let mut remove = None;
+    for (index, animation) in clip.animations.iter_mut().enumerate() {
+        egui::Frame::new().fill(Color32::WHITE.gamma_multiply(0.035)).corner_radius(4).inner_margin(6).show(ui, |ui| {
+            ui.push_id(index, |ui| {
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut animation.enabled, "");
+                    egui::ComboBox::from_id_salt("kind").width(110.0).selected_text(animation.kind.name()).show_ui(ui, |ui| {
+                        for (kind, name, amount) in AnimKind::ALL {
+                            if ui.selectable_label(animation.kind == kind, name).clicked() {
+                                animation.kind = kind;
+                                animation.amount = amount;
+                            }
+                        }
+                    });
+                    egui::ComboBox::from_id_salt("trigger").width(80.0).selected_text(animation.trigger.name()).show_ui(ui, |ui| {
+                        for (trigger, name) in Trigger::ALL {
+                            ui.selectable_value(&mut animation.trigger, trigger, name);
+                        }
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if widgets::pill(ui, ph::TRASH, "", false, accent).clicked() {
+                            remove = Some(index);
+                        }
+                    });
+                });
+                ui.horizontal(|ui| {
+                    egui::ComboBox::from_id_salt("curve").width(110.0).selected_text(animation.curve.name()).show_ui(ui, |ui| {
+                        for (curve, name) in Curve::ALL {
+                            ui.selectable_value(&mut animation.curve, curve, name);
+                        }
+                    });
+                    ui.add(egui::DragValue::new(&mut animation.delay).prefix("Delay ").suffix(" f").range(0..=length));
+                    ui.add(egui::DragValue::new(&mut animation.duration).prefix("Length ").suffix(" f").range(1..=length.max(600)));
+                });
+                ui.add(egui::Slider::new(&mut animation.amount, -2000.0..=2000.0).clamping(egui::SliderClamping::Never).text("Amount"));
+            });
+        });
+        ui.add_space(3.0);
+    }
+    if let Some(index) = remove {
+        clip.animations.remove(index);
     }
 }
 
@@ -2810,6 +3093,7 @@ impl App {
         }
         self.release_idle_memory(ctx);
         self.sync_wallpaper(ctx);
+        self.page_transition(root, ctx);
         self.paint_background(ctx);
         if self.show_home {
             self.window_edges(ctx);

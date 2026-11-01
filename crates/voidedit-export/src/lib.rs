@@ -9,7 +9,7 @@ use filmcraft_h264enc::{Encoder, EncoderConfig, PacketFormat, RateControl};
 use filmcraft_isobmff::{AvcConfig, Brand, Mp4Writer, SampleEntry, TrackConfig, WriteSample, WriterOptions};
 use voidedit_core::Project;
 use voidedit_media::{decode_now, AudioClip, FrameWant, Gain, Library, Mixer};
-use voidedit_render::{render, Frame, Image};
+use voidedit_render::{render, Frame, Image, upscale};
 
 const AUDIO_RATE: u32 = 48_000;
 
@@ -99,6 +99,8 @@ pub struct ExportOptions {
     pub scale: f32,
     pub quality: f32,
     pub format: ExportFormat,
+    pub upscale: u32,
+    pub sharpen: f32,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -110,7 +112,7 @@ pub enum ExportFormat {
 
 impl Default for ExportOptions {
     fn default() -> Self {
-        Self { scale: 1.0, quality: 20.0, format: ExportFormat::Mp4 }
+        Self { scale: 1.0, quality: 20.0, format: ExportFormat::Mp4, upscale: 1, sharpen: 0.4 }
     }
 }
 
@@ -197,8 +199,9 @@ pub fn export(project: &Project, library: &Library, path: &Path, progress: &Arc<
 
 fn write_mp4(project: &Project, library: &Library, path: &Path, options: ExportOptions, progress: &Arc<Progress>) -> Result<(), String> {
     let scale = options.scale.clamp(0.1, 1.0);
-    let width = ((project.width as f32 * scale) as usize) & !1;
-    let height = ((project.height as f32 * scale) as usize) & !1;
+    let factor = options.upscale.clamp(1, 4) as usize;
+    let width = ((project.width as f32 * scale) as usize * factor) & !1;
+    let height = ((project.height as f32 * scale) as usize * factor) & !1;
     let width = width.max(2);
     let height = height.max(2);
     let fps = project.fps.max(1);
@@ -223,6 +226,7 @@ fn write_mp4(project: &Project, library: &Library, path: &Path, options: ExportO
         Some((aac, track))
     };
     let mut frame = Frame::default();
+    let mut enlarged = Frame::default();
     let (mut y, mut u, mut v) = (vec![0; width * height], vec![0; width * height / 4], vec![0; width * height / 4]);
     let mut audio_position = 0i64;
     let mut mixer = Mixer::default();
@@ -232,7 +236,12 @@ fn write_mp4(project: &Project, library: &Library, path: &Path, options: ExportO
         }
         let images = gather(project, library, index);
         render(project, index, scale, &mut frame, &|name| images.get(name).cloned());
-        to_yuv(&frame, width, height, &mut y, &mut u, &mut v);
+        if factor > 1 {
+            upscale(&frame, width, height, options.sharpen, &mut enlarged);
+            to_yuv(&enlarged, width, height, &mut y, &mut u, &mut v);
+        } else {
+            to_yuv(&frame, width, height, &mut y, &mut u, &mut v);
+        }
         let input = filmcraft_h264enc::YuvFrame { y: &y, u: &u, v: &v, y_stride: width, uv_stride: width / 2 };
         for packet in encoder.encode(&input, index as i64).map_err(|error| format!("{error:?}"))? {
             write_video(&mut writer, video, &packet)?;

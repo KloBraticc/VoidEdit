@@ -490,6 +490,9 @@ impl App {
                     self.open_path(path);
                 }
             }
+            if widgets::primary_card(ui, ph::SPARKLE, "Import animation", "Lottie exported from After Effects", accent, false).clicked() {
+                self.import_lottie();
+            }
             if widgets::primary_card(ui, ph::MAGNIFYING_GLASS, "Find projects", "Scan a folder and add them all", accent, false).clicked() {
                 if let Some(folder) = rfd::FileDialog::new().pick_folder() {
                     let mut found = Vec::new();
