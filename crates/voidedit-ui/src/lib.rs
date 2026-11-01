@@ -2108,7 +2108,6 @@ impl App {
             let rows = [
                 ("Name", name),
                 ("Resolution", format!("{} x {}", self.project.width, self.project.height)),
-                ("Frame rate", format!("{} fps", self.project.fps)),
                 ("Length", timecode(self.project.end_frame(), self.project.fps)),
                 ("Clips", self.project.clips.len().to_string()),
             ];
@@ -2118,6 +2117,22 @@ impl App {
                     ui.label(value);
                 });
             }
+            ui.horizontal(|ui| {
+                ui.add_sized([100.0, 20.0], egui::Label::new(RichText::new("Frame rate").color(Color32::GRAY)));
+                let current = self.project.fps;
+                let mut chosen = current;
+                egui::ComboBox::from_id_salt("project-fps").width(70.0).selected_text(format!("{current} fps")).show_ui(ui, |ui| {
+                    for fps in [24, 25, 30, 48, 50, 60, 90, 120, 144, 240] {
+                        ui.selectable_value(&mut chosen, fps, format!("{fps} fps"));
+                    }
+                });
+                ui.add(egui::DragValue::new(&mut chosen).range(1..=240).suffix(" fps"));
+                if chosen != current {
+                    let position = self.frame as f64 / current.max(1) as f64;
+                    self.project.set_fps(chosen);
+                    self.frame = (position * chosen as f64).round() as u32;
+                }
+            });
             if selected.is_none() {
                 return;
             }

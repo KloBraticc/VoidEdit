@@ -634,6 +634,43 @@ impl Project {
         self.clips.push(outer);
     }
 
+    pub fn set_fps(&mut self, fps: u32) {
+        let fps = fps.clamp(1, 240);
+        if fps == self.fps || self.fps == 0 {
+            self.fps = fps;
+            return;
+        }
+        let ratio = fps as f64 / self.fps as f64;
+        let scaled = |frame: u32| (frame as f64 * ratio).round() as u32;
+        self.duration = scaled(self.duration).max(1);
+        for marker in &mut self.markers {
+            *marker = scaled(*marker);
+        }
+        for clip in &mut self.clips {
+            clip.start = scaled(clip.start);
+            clip.end = scaled(clip.end).max(clip.start + 1);
+            clip.offset = scaled(clip.offset);
+            clip.fade_in = scaled(clip.fade_in);
+            clip.fade_out = scaled(clip.fade_out);
+            for animation in &mut clip.animations {
+                animation.delay = scaled(animation.delay);
+                animation.duration = scaled(animation.duration).max(1);
+            }
+            let nested = clip.nested.take();
+            if let Ok(mut value) = serde_json::to_value(&*clip) {
+                scale_keyframes(&mut value, ratio);
+                if let Ok(updated) = serde_json::from_value::<Clip>(value) {
+                    *clip = updated;
+                }
+            }
+            clip.nested = nested;
+            if let Some(inner) = &mut clip.nested {
+                inner.set_fps(fps);
+            }
+        }
+        self.fps = fps;
+    }
+
     pub fn shutter_times(&self, frame: u32, preview: bool) -> Vec<f32> {
         let blur = &self.motion_blur;
         if !blur.enabled || blur.shutter <= 0.0 {
@@ -915,6 +952,27 @@ impl Project {
 
 pub const MAX_NESTING: u32 = 8;
 
+fn scale_keyframes(value: &mut serde_json::Value, ratio: f64) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if map.contains_key("ease") && map.contains_key("value") {
+                if let Some(frame) = map.get("frame").and_then(serde_json::Value::as_f64) {
+                    map.insert("frame".to_string(), serde_json::json!((frame * ratio).round() as u32));
+                }
+            }
+            for item in map.values_mut() {
+                scale_keyframes(item, ratio);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                scale_keyframes(item, ratio);
+            }
+        }
+        _ => {}
+    }
+}
+
 pub fn media_key(path: &str, seconds: f64) -> String {
     format!("{path}\u{0}{}", (seconds * 1000.0).round() as i64)
 }
@@ -974,6 +1032,21 @@ pub fn timecode(frame: u32, fps: u32) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn changing_frame_rate_keeps_real_time_positions() {
+        let mut project = Project::default();
+        let mut clip = project.new_clip(Shape::Solid, 30);
+        clip.end = 90;
+        clip.fade_in = 15;
+        clip.x.set_key(60, 500.0);
+        project.clips.push(clip);
+        project.markers.push(30);
+        project.set_fps(60);
+        let clip = &project.clips[0];
+        assert_eq!((project.fps, clip.start, clip.end, clip.fade_in, project.markers[0]), (60, 60, 180, 30, 60));
+        assert_eq!(clip.x.keys[0].frame, 120);
+    }
+
     use super::*;
 
     #[test]
