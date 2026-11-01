@@ -2713,9 +2713,6 @@ impl App {
         let status = egui::Frame::new().fill(self.shade(0.5)).inner_margin(egui::Margin::symmetric(10, 2));
         egui::Panel::bottom("pages").show_separator_line(false).frame(status).show_inside(root, |ui| {
             ui.horizontal(|ui| {
-                widgets::paint_icon(ui.painter(), ui.cursor().min + Vec2::new(9.0, 10.0), 18.0, ph::SPARKLE, Color32::WHITE);
-                ui.add_space(20.0);
-                ui.label(RichText::new("Void Edit").strong());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if widgets::pill(ui, ph::GEAR, "", false, self.accent()).on_hover_text("Settings").clicked() {
                         self.show_settings = true;

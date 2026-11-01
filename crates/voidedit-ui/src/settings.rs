@@ -71,7 +71,7 @@ impl Theme {
 
 impl Default for Theme {
     fn default() -> Self {
-        Self::preset("Studio", [24, 24, 28], [40, 40, 46], [200, 200, 205])
+        Self::preset("Studio", [8, 8, 8], [22, 22, 22], [205, 205, 205])
     }
 }
 
@@ -168,6 +168,9 @@ impl Settings {
             .and_then(|folder| std::fs::read_to_string(folder.join("settings.json")).ok())
             .and_then(|text| serde_json::from_str(&text).ok())
             .unwrap_or_default();
+        if settings.theme.name == "Studio" {
+            settings.theme = Theme::default();
+        }
         if settings.accent == [230, 60, 50] {
             settings.accent = Self::default().accent;
         }
