@@ -11,16 +11,17 @@ pub struct Settings {
     pub preview_quality: f32,
     pub snapping: bool,
     pub gpu_preview: bool,
+    pub caption_language: String,
     pub keys: std::collections::BTreeMap<String, String>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { accent: [58, 134, 255], panel_gray: 30, ui_scale: 1.0, preview_quality: 1.0, snapping: true, gpu_preview: false, keys: Default::default() }
+        Self { accent: [58, 134, 255], panel_gray: 30, ui_scale: 1.0, preview_quality: 1.0, snapping: true, gpu_preview: false, caption_language: "en".into(), keys: Default::default() }
     }
 }
 
-pub const ACTIONS: [(&str, &str); 16] = [("Split (Ctrl)", "K"), ("Copy (Ctrl)", "C"), ("Paste (Ctrl)", "V"), ("Duplicate (Ctrl)", "D"), ("Import (Ctrl)", "I"), ("Export (Ctrl)", "M"), ("Play or pause", "Space"), ("Selection tool", "V"), ("Razor tool", "C"), ("Marker", "M"), ("New text", "T"), ("Previous frame", "ArrowLeft"), ("Next frame", "ArrowRight"), ("Previous edit", "ArrowUp"), ("Next edit", "ArrowDown"), ("Go to start", "Home")];
+pub const ACTIONS: [(&str, &str); 18] = [("Undo (Ctrl)", "Z"), ("Save (Ctrl)", "S"), ("Split (Ctrl)", "K"), ("Copy (Ctrl)", "C"), ("Paste (Ctrl)", "V"), ("Duplicate (Ctrl)", "D"), ("Import (Ctrl)", "I"), ("Export (Ctrl)", "M"), ("Play or pause", "Space"), ("Selection tool", "V"), ("Razor tool", "C"), ("Marker", "M"), ("New text", "T"), ("Previous frame", "ArrowLeft"), ("Next frame", "ArrowRight"), ("Previous edit", "ArrowUp"), ("Next edit", "ArrowDown"), ("Go to start", "Home")];
 
 impl Settings {
     pub fn key(&self, action: &str) -> Option<eframe::egui::Key> {

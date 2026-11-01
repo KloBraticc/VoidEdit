@@ -116,6 +116,10 @@ pub enum Effect {
     Vibrance { amount: Param },
     Duotone { dark: [u8; 3], light: [u8; 3] },
     Mirror,
+    MotionBlur { length: Param },
+    ZoomBlur { amount: Param },
+    Ripple { amount: Param, frequency: Param },
+    Tile { count: Param },
     Letterbox { amount: Param },
     GradientOverlay { top: [u8; 3], bottom: [u8; 3], amount: Param },
     Border { size: Param, color: [u8; 3] },
@@ -158,7 +162,7 @@ pub enum Blend {
     SoftLight,
 }
 
-pub const LOOKS: [&str; 8] = ["Cinematic", "Vintage", "Black and White", "Warm", "Cool", "Vivid", "Faded", "Noir"];
+pub const LOOKS: [&str; 13] = ["Cinematic", "Vintage", "Black and White", "Warm", "Cool", "Vivid", "Faded", "Noir", "Night Vision", "Bleach Bypass", "Cross Process", "Retro TV", "Sunset"];
 
 pub fn look(name: &str) -> Vec<Effect> {
     let p = Param::new;
@@ -170,6 +174,11 @@ pub fn look(name: &str) -> Vec<Effect> {
         "Cool" => vec![Effect::Temperature { amount: p(-25.0) }, Effect::Saturation { amount: p(5.0) }],
         "Vivid" => vec![Effect::Vibrance { amount: p(50.0) }, Effect::Contrast { amount: p(10.0) }],
         "Faded" => vec![Effect::Levels { black: p(-30.0), white: p(255.0) }, Effect::Saturation { amount: p(-25.0) }],
+        "Night Vision" => vec![Effect::Grayscale, Effect::Tint { amount: p(70.0), color: [40, 255, 90] }, Effect::Noise { amount: p(12.0) }, Effect::Vignette { amount: p(70.0) }],
+        "Bleach Bypass" => vec![Effect::Saturation { amount: p(-55.0) }, Effect::Contrast { amount: p(35.0) }],
+        "Cross Process" => vec![Effect::ColorBalance { red: p(10.0), green: p(5.0), blue: p(-15.0) }, Effect::Contrast { amount: p(20.0) }, Effect::Saturation { amount: p(15.0) }],
+        "Retro TV" => vec![Effect::Scanlines { strength: p(30.0), spacing: p(3.0) }, Effect::ChromaticAberration { amount: p(3.0) }, Effect::Noise { amount: p(8.0) }, Effect::Vignette { amount: p(45.0) }],
+        "Sunset" => vec![Effect::GradientOverlay { top: [255, 110, 60], bottom: [120, 40, 150], amount: p(25.0) }, Effect::Saturation { amount: p(15.0) }],
         "Noir" => vec![Effect::Grayscale, Effect::Contrast { amount: p(45.0) }, Effect::Vignette { amount: p(60.0) }, Effect::Noise { amount: p(5.0) }],
         _ => Vec::new(),
     }
@@ -219,7 +228,8 @@ impl Default for Mask {
     }
 }
 
-pub const EFFECT_NAMES: [&str; 45] = [
+pub const EFFECT_NAMES: [&str; 49] = [
+    "Motion Blur", "Zoom Blur", "Ripple", "Tile",
     "Letterbox", "Gradient Overlay", "Border", "Sketch",
     "Emboss", "Chromatic Aberration", "Scanlines", "Swirl", "Kaleidoscope", "Fisheye", "Channel Swap",
     "Solarize", "Vibrance", "Duotone", "Mirror",
@@ -259,6 +269,10 @@ impl Effect {
             "Duotone" => Effect::Duotone { dark: [30, 10, 80], light: [255, 220, 120] },
             "Mirror" => Effect::Mirror,
             "Emboss" => Effect::Emboss,
+            "Motion Blur" => Effect::MotionBlur { length: Param::new(16.0) },
+            "Zoom Blur" => Effect::ZoomBlur { amount: Param::new(15.0) },
+            "Ripple" => Effect::Ripple { amount: Param::new(3.0), frequency: Param::new(30.0) },
+            "Tile" => Effect::Tile { count: Param::new(3.0) },
             "Letterbox" => Effect::Letterbox { amount: Param::new(12.0) },
             "Gradient Overlay" => Effect::GradientOverlay { top: [255, 80, 120], bottom: [40, 80, 255], amount: Param::new(40.0) },
             "Border" => Effect::Border { size: Param::new(20.0), color: [255, 255, 255] },
@@ -310,6 +324,10 @@ impl Effect {
             Effect::Duotone { .. } => "Duotone",
             Effect::Mirror => "Mirror",
             Effect::Emboss => "Emboss",
+            Effect::MotionBlur { .. } => "Motion Blur",
+            Effect::ZoomBlur { .. } => "Zoom Blur",
+            Effect::Ripple { .. } => "Ripple",
+            Effect::Tile { .. } => "Tile",
             Effect::Letterbox { .. } => "Letterbox",
             Effect::GradientOverlay { .. } => "Gradient Overlay",
             Effect::Border { .. } => "Border",

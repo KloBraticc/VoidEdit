@@ -150,12 +150,52 @@ pub struct Warp {
     pub segments: f32,
     pub fisheye: f32,
     pub letterbox: f32,
+    pub ripple: (f32, f32),
+    pub tile: f32,
     pub gradient: Option<([f32; 3], [f32; 3], f32)>,
     pub border: Option<(f32, [f32; 3])>,
 }
 
+fn zoom_blur(image: &Image, amount: f32) -> Image {
+    const STEPS: usize = 8;
+    let (width, height) = (image.width, image.height);
+    let mut pixels = image.pixels.clone();
+    if width == 0 || height == 0 || amount <= 0.0 {
+        return Image { width, height, pixels };
+    }
+    pixels.par_chunks_mut(width * 4).enumerate().for_each(|(row, line)| {
+        for column in 0..width {
+            let mut total = [0u32; 4];
+            for step in 0..STEPS {
+                let zoom = 1.0 - amount * step as f32 / STEPS as f32;
+                let x = (width as f32 / 2.0 + (column as f32 - width as f32 / 2.0) * zoom) as usize;
+                let y = (height as f32 / 2.0 + (row as f32 - height as f32 / 2.0) * zoom) as usize;
+                let start = (y.min(height - 1) * width + x.min(width - 1)) * 4;
+                for channel in 0..4 {
+                    total[channel] += image.pixels[start + channel] as u32;
+                }
+            }
+            for channel in 0..4 {
+                line[column * 4 + channel] = (total[channel] / STEPS as u32) as u8;
+            }
+        }
+    });
+    Image { width, height, pixels }
+}
+
 fn warp_uv(warp: &Warp, u: f32, v: f32) -> (f32, f32) {
+    let (mut u, mut v) = (u, v);
+    if warp.tile >= 2.0 {
+        u = (u * warp.tile).fract();
+        v = (v * warp.tile).fract();
+    }
     let (mut x, mut y) = (u - 0.5, v - 0.5);
+    if warp.ripple.0 != 0.0 {
+        let radius = (x * x + y * y).sqrt();
+        let shift = warp.ripple.0 * (radius * warp.ripple.1).sin();
+        x += x * shift;
+        y += y * shift;
+    }
     if warp.segments >= 2.0 {
         let radius = (x * x + y * y).sqrt();
         let wedge = std::f32::consts::TAU / warp.segments;
@@ -520,6 +560,7 @@ fn resolve(clip: &Clip, frame: f32, scale: f32, image: Option<Arc<Image>>) -> Op
             Effect::Duotone { dark, light } => ops.push(Op::Duotone(dark.map(|channel| channel as f32), light.map(|channel| channel as f32))),
             Effect::Mirror => mirror = true,
             Effect::ChannelSwap => ops.push(Op::Swap),
+            Effect::MotionBlur { .. } | Effect::ZoomBlur { .. } | Effect::Ripple { .. } | Effect::Tile { .. } => {}
             Effect::Letterbox { .. } | Effect::GradientOverlay { .. } | Effect::Border { .. } | Effect::Sketch => {}
             Effect::Emboss | Effect::ChromaticAberration { .. } | Effect::Scanlines { .. } | Effect::Swirl { .. } | Effect::Kaleidoscope { .. } | Effect::Fisheye { .. } => {}
             Effect::HueShift { degrees } => ops.push(Op::Hue(degrees.at(frame).to_radians())),
@@ -569,6 +610,23 @@ fn resolve(clip: &Clip, frame: f32, scale: f32, image: Option<Arc<Image>>) -> Op
                     image = Some(Arc::new(Image { width: edges.width, height: edges.height, pixels }));
                 }
             }
+            Effect::MotionBlur { length } => {
+                if let Some(current) = &image {
+                    let radius = (length.at(frame).max(0.0) as usize).min(64);
+                    if radius > 0 && current.width > 0 {
+                        let mut pixels = current.pixels.clone();
+                        pixels.par_chunks_mut(current.width * 4).zip(current.pixels.par_chunks(current.width * 4)).for_each(|(out, input)| box_line(input, out, current.width, 4, radius));
+                        image = Some(Arc::new(Image { width: current.width, height: current.height, pixels }));
+                    }
+                }
+            }
+            Effect::ZoomBlur { amount } => {
+                if let Some(current) = &image {
+                    image = Some(Arc::new(zoom_blur(current, amount.at(frame).clamp(0.0, 100.0) / 100.0)));
+                }
+            }
+            Effect::Ripple { amount, frequency } => warp.ripple = (amount.at(frame) / 100.0, frequency.at(frame)),
+            Effect::Tile { count } => warp.tile = count.at(frame).clamp(0.0, 32.0),
             Effect::Letterbox { amount } => warp.letterbox = amount.at(frame).clamp(0.0, 50.0) / 100.0,
             Effect::GradientOverlay { top, bottom, amount } => warp.gradient = Some((top.map(|c| c as f32), bottom.map(|c| c as f32), amount.at(frame).clamp(0.0, 100.0) / 100.0)),
             Effect::Border { size, color } => warp.border = Some((size.at(frame).max(0.0) * scale, color.map(|c| c as f32))),

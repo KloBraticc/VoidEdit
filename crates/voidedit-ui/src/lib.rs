@@ -459,6 +459,7 @@ impl App {
         let fps = self.project.fps.max(1) as f64;
         let job = Arc::new(Mutex::new(CaptionJob { start: clip.start as f64 / fps, offset: clip.offset as f64 / fps, ..CaptionJob::default() }));
         let (shared, library, repaint) = (job.clone(), self.library.clone(), self.context.clone());
+        let language = self.settings.caption_language.clone();
         let spawned = std::thread::Builder::new().name("captions".into()).spawn(move || {
             let say = |text: &str| {
                 if let Ok(mut state) = shared.lock() {
@@ -472,7 +473,7 @@ impl App {
                 say("Reading the audio");
                 let samples = mono_samples(&library, &path, voidedit_speech::SAMPLE_RATE as u32).ok_or("This clip has no audio")?;
                 say("Listening for speech");
-                voidedit_speech::transcribe(&folder, &samples, |amount| say(&format!("Listening for speech: {:.0}%", amount * 100.0)))
+                voidedit_speech::transcribe(&folder, &samples, &language, |amount| say(&format!("Listening for speech: {:.0}%", amount * 100.0)))
             }))
             .unwrap_or_else(|_| Err("Caption generation stopped unexpectedly".into()));
             if let Ok(mut state) = shared.lock() {
@@ -676,19 +677,18 @@ impl App {
         if ctx.wants_keyboard_input() {
             return;
         }
-        let command = |key| ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, key));
         let chord = |settings: &Settings, action: &str| settings.key(action).is_some_and(|key| ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, key)));
         let shift_command = |key| ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, key));
         let shift = |key| ctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, key));
         let plain = |key| ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, key));
-        if shift_command(egui::Key::Z) {
+        if shift_command(self.settings.key("Undo (Ctrl)").unwrap_or(egui::Key::Z)) {
             self.redo();
-        } else if command(egui::Key::Z) {
+        } else if chord(&self.settings, "Undo (Ctrl)") {
             self.undo();
         }
-        if shift_command(egui::Key::S) {
+        if shift_command(self.settings.key("Save (Ctrl)").unwrap_or(egui::Key::S)) {
             self.save(true);
-        } else if command(egui::Key::S) {
+        } else if chord(&self.settings, "Save (Ctrl)") {
             self.save(false);
         }
         if chord(&self.settings, "Split (Ctrl)") {
@@ -846,7 +846,16 @@ impl App {
                     }
                 });
                 ui.menu_button("Captions", |ui| {
-                    if ui.button("Generate from Selected Clip").on_hover_text("Downloads a 144 MB speech model the first time, English only").clicked() {
+                    let current = voidedit_speech::LANGUAGES.iter().find(|(_, code)| *code == self.settings.caption_language).map_or("English", |(name, _)| *name);
+                    egui::ComboBox::from_label("Spoken language").selected_text(current).show_ui(ui, |ui| {
+                        for (name, code) in voidedit_speech::LANGUAGES {
+                            if ui.selectable_label(self.settings.caption_language == code, name).clicked() {
+                                self.settings.caption_language = code.to_string();
+                                self.settings.save();
+                            }
+                        }
+                    });
+                    if ui.button("Generate from Selected Clip").on_hover_text("Downloads a 144 MB speech model the first time").clicked() {
                         ui.close_menu();
                         self.generate_captions();
                     }
@@ -1352,6 +1361,13 @@ impl App {
                             Self::param(ui, accent, "Frequency", frequency, frame, 0.1);
                         }
                         Effect::EdgeDetect | Effect::Mirror | Effect::Emboss | Effect::ChannelSwap | Effect::Sketch => {}
+                        Effect::MotionBlur { length } => Self::param(ui, accent, "Length", length, frame, 0.25),
+                        Effect::ZoomBlur { amount } => Self::param(ui, accent, "Amount", amount, frame, 0.5),
+                        Effect::Ripple { amount, frequency } => {
+                            Self::param(ui, accent, "Amount", amount, frame, 0.25);
+                            Self::param(ui, accent, "Frequency", frequency, frame, 0.5);
+                        }
+                        Effect::Tile { count } => Self::param(ui, accent, "Count", count, frame, 0.1),
                         Effect::Letterbox { amount } => Self::param(ui, accent, "Amount", amount, frame, 0.25),
                         Effect::GradientOverlay { top, bottom, amount } => {
                             ui.horizontal(|ui| {

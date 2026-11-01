@@ -93,7 +93,9 @@ fn token(tokenizer: &Tokenizer, text: &str) -> Result<u32, String> {
     tokenizer.token_to_id(text).ok_or_else(|| format!("missing token {text}"))
 }
 
-pub fn transcribe(folder: &Path, samples: &[f32], mut progress: impl FnMut(f32)) -> Result<Vec<Segment>, String> {
+pub const LANGUAGES: [(&str, &str); 13] = [("English", "en"), ("Spanish", "es"), ("French", "fr"), ("German", "de"), ("Portuguese", "pt"), ("Italian", "it"), ("Russian", "ru"), ("Japanese", "ja"), ("Korean", "ko"), ("Chinese", "zh"), ("Arabic", "ar"), ("Hindi", "hi"), ("Turkish", "tr")];
+
+pub fn transcribe(folder: &Path, samples: &[f32], language: &str, mut progress: impl FnMut(f32)) -> Result<Vec<Segment>, String> {
     let error = |e: candle_core::Error| e.to_string();
     let device = Device::Cpu;
     let config: Config = serde_json::from_str(&std::fs::read_to_string(folder.join("config.json")).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
@@ -105,7 +107,7 @@ pub fn transcribe(folder: &Path, samples: &[f32], mut progress: impl FnMut(f32))
     let frames = mel.len() / config.num_mel_bins;
     let mel = Tensor::from_vec(mel, (1, config.num_mel_bins, frames), &device).map_err(error)?;
     let start_of_text = token(&tokenizer, whisper::SOT_TOKEN)?;
-    let english = token(&tokenizer, "<|en|>")?;
+    let language = token(&tokenizer, &format!("<|{language}|>"))?;
     let task = token(&tokenizer, whisper::TRANSCRIBE_TOKEN)?;
     let end_of_text = token(&tokenizer, whisper::EOT_TOKEN)?;
     let no_timestamps = token(&tokenizer, whisper::NO_TIMESTAMPS_TOKEN)?;
@@ -125,7 +127,7 @@ pub fn transcribe(folder: &Path, samples: &[f32], mut progress: impl FnMut(f32))
         let part = mel.narrow(2, seek, window).map_err(error)?;
         let features = audio_pad(&part, config.num_mel_bins, &device).map_err(error)?;
         let encoded = model.encoder.forward(&features, true).map_err(error)?;
-        let mut tokens = vec![start_of_text, english, task];
+        let mut tokens = vec![start_of_text, language, task];
         for step in 0..MAX_TOKENS_PER_WINDOW {
             let input = Tensor::new(tokens.as_slice(), &device).and_then(|t| t.unsqueeze(0)).map_err(error)?;
             let decoded = model.decoder.forward(&input, &encoded, step == 0).map_err(error)?;
@@ -211,7 +213,7 @@ mod tests {
         let samples: Vec<f32> = bytes.chunks_exact(2).map(|pair| i16::from_le_bytes([pair[0], pair[1]]) as f32 / 32768.0).collect();
         ensure_model(folder.as_ref(), |_| {}).unwrap();
         let started = std::time::Instant::now();
-        let result = transcribe(folder.as_ref(), &samples, |_| {}).unwrap();
+        let result = transcribe(folder.as_ref(), &samples, "en", |_| {}).unwrap();
         println!("{result:?} in {:?}", started.elapsed());
         assert!(!result.is_empty());
     }
