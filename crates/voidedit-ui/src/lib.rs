@@ -9,10 +9,10 @@ use std::time::Instant;
 use egui_dock::{DockArea, DockState, NodeIndex, Style, TabViewer};
 use eframe::egui::{self, Color32, Pos2, Rect, RichText, Sense, Stroke, Vec2};
 use settings::Settings;
-use voidedit_core::{timecode, Clip, Effect, History, MaskShape, Param, Project, Shape, TrackKind, BLENDS, EFFECT_NAMES, TRANSITIONS};
+use voidedit_core::{timecode, Clip, Ease, Effect, History, MaskShape, Param, Project, Shape, TrackKind, BLENDS, EFFECT_NAMES, TRANSITIONS};
 use voidedit_export::{audio_clips, export_with, ExportFormat, ExportOptions, Progress};
 use voidedit_gpu::GpuCompositor;
-use voidedit_media::{track_point, waveform, Audio, FrameWant, Frames, Library};
+use voidedit_media::{decode_now, track_point, waveform, Audio, FrameWant, Frames, Library};
 use voidedit_render::{render, Frame};
 
 const HEADER_WIDTH: f32 = 128.0;
@@ -101,6 +101,13 @@ impl TabViewer for Viewer<'_> {
     }
 }
 
+#[derive(Clone, Copy)]
+enum Gizmo {
+    Move,
+    Scale { distance: f32, scale: f32 },
+    MaskPoint(usize),
+}
+
 struct TrackJob {
     points: Arc<Mutex<Vec<(u32, (i64, i64))>>>,
     done: Arc<std::sync::atomic::AtomicBool>,
@@ -137,6 +144,9 @@ pub struct App {
     left: LeftTab,
     dock: Option<DockState<Pane>>,
     drawing_mask: bool,
+    gizmo: Option<Gizmo>,
+    thumbs: Arc<Mutex<HashMap<String, egui::ColorImage>>>,
+    thumb_textures: HashMap<String, egui::TextureHandle>,
     picking_track: bool,
     tracking: Option<TrackJob>,
     track_target: usize,
@@ -195,6 +205,9 @@ impl App {
             left: LeftTab::Project,
             dock: Some(Settings::folder().and_then(|folder| std::fs::read_to_string(folder.join("layout.json")).ok()).and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_else(default_layout)),
             drawing_mask: false,
+            gizmo: None,
+            thumbs: Arc::default(),
+            thumb_textures: HashMap::new(),
             picking_track: false,
             tracking: None,
             track_target: 0,
@@ -435,11 +448,27 @@ impl App {
         }
         let library = self.library.clone();
         let waves = self.waves.clone();
+        let thumbs = self.thumbs.clone();
         let repaint = self.context.clone();
         let _ = std::thread::Builder::new().name("waveform".into()).spawn(move || {
             let peaks = waveform(&library, &file, WAVEFORM_POINTS);
             if let Ok(mut waves) = waves.lock() {
-                waves.insert(file, peaks);
+                waves.insert(file.clone(), peaks);
+            }
+            let want = FrameWant { path: file.clone(), seconds: 0.5, scale: 0.1 };
+            if let Some(image) = decode_now(&library, &want).filter(|image| image.width > 1) {
+                let height = 42usize;
+                let width = (image.width * height / image.height.max(1)).max(1);
+                let mut pixels = Vec::with_capacity(width * height * 4);
+                for y in 0..height {
+                    for x in 0..width {
+                        let start = (y * image.height / height * image.width + x * image.width / width) * 4;
+                        pixels.extend_from_slice(&image.pixels[start..start + 4]);
+                    }
+                }
+                if let Ok(mut thumbs) = thumbs.lock() {
+                    thumbs.insert(file, egui::ColorImage::from_rgba_unmultiplied([width, height], &pixels));
+                }
             }
             repaint.request_repaint();
         });
@@ -1027,6 +1056,18 @@ impl App {
             if ui.add(egui::DragValue::new(&mut value).speed(speed).max_decimals(1)).changed() {
                 param.set(frame, value);
             }
+            if param.has_key(frame) {
+                let current = param.keys.iter().find(|key| key.frame == frame).map_or(Ease::Smooth, |key| key.ease);
+                egui::ComboBox::from_id_salt((label, "ease")).width(62.0).selected_text(format!("{current:?}")).show_ui(ui, |ui| {
+                    for ease in [Ease::Linear, Ease::Smooth, Ease::Hold] {
+                        if ui.selectable_label(current == ease, format!("{ease:?}")).clicked() {
+                            if let Some(key) = param.keys.iter_mut().find(|key| key.frame == frame) {
+                                key.ease = ease;
+                            }
+                        }
+                    }
+                });
+            }
             let has_expression = param.expression.is_some();
             let mark = RichText::new("=").color(if has_expression { accent } else { Color32::DARK_GRAY });
             ui.menu_button(mark, |ui| {
@@ -1281,7 +1322,8 @@ impl App {
         ui.allocate_ui_with_layout(area, egui::Layout::centered_and_justified(egui::Direction::TopDown), |ui| {
             let shown = if self.gpu_used { self.gpu_texture } else { self.texture.as_ref().map(egui::TextureHandle::id) };
             if let Some(id) = shown {
-                let picture = ui.add(egui::Image::new((id, size)).fit_to_exact_size(size).corner_radius(4).sense(Sense::click()));
+                let picture = ui.add(egui::Image::new((id, size)).fit_to_exact_size(size).corner_radius(4).sense(Sense::click_and_drag()));
+                self.preview_overlay(ui, &picture);
                 if self.picking_track && picture.clicked() {
                     if let (Some(position), Some(index)) = (picture.interact_pointer_pos(), self.selected) {
                         if let Some(clip) = self.project.clips.get(index) {
@@ -1335,6 +1377,87 @@ impl App {
                 ui.label(RichText::new(timecode(end, fps)).monospace());
             });
         });
+    }
+
+    fn preview_overlay(&mut self, ui: &egui::Ui, picture: &egui::Response) {
+        if self.drawing_mask || self.picking_track {
+            return;
+        }
+        let Some(index) = self.selected.filter(|index| *index < self.project.clips.len()) else { return };
+        let frame = self.frame;
+        let time = frame as f32;
+        let ratio = picture.rect.width() / self.project.width as f32;
+        let clip = &self.project.clips[index];
+        if frame < clip.start || frame >= clip.end {
+            return;
+        }
+        let to_screen = |x: f32, y: f32| picture.rect.min + Vec2::new(x, y) * ratio;
+        let scale = clip.scale.at(time).max(0.0) / 100.0;
+        let (center_x, center_y) = (clip.x.at(time), clip.y.at(time));
+        let (half_w, half_h) = (clip.width * scale / 2.0, clip.height * scale / 2.0);
+        let (sin, cos) = clip.rotation.at(time).to_radians().sin_cos();
+        let corner = |dx: f32, dy: f32| to_screen(center_x + dx * cos - dy * sin, center_y + dx * sin + dy * cos);
+        let corners = [corner(-half_w, -half_h), corner(half_w, -half_h), corner(half_w, half_h), corner(-half_w, half_h)];
+        let painter = ui.painter().with_clip_rect(picture.rect);
+        let accent = self.accent();
+        let polygon = clip.mask.shape == MaskShape::Polygon;
+        let mask_points: Vec<Pos2> = if polygon {
+            clip.mask.points.iter().map(|point| corner((point[0] - 0.5) * half_w * 2.0, (point[1] - 0.5) * half_h * 2.0)).collect()
+        } else {
+            Vec::new()
+        };
+        if clip.text.is_none() {
+            for side in 0..4 {
+                painter.line_segment([corners[side], corners[(side + 1) % 4]], Stroke::new(1.0_f32, accent));
+            }
+            for point in corners {
+                painter.rect_filled(Rect::from_center_size(point, Vec2::splat(8.0)), 1.0_f32, Color32::WHITE);
+            }
+        }
+        for (position, point) in mask_points.iter().enumerate() {
+            painter.circle_filled(*point, 5.0, accent);
+            painter.line_segment([*point, mask_points[(position + 1) % mask_points.len()]], Stroke::new(1.0_f32, Color32::WHITE));
+        }
+        let pointer = picture.interact_pointer_pos();
+        if picture.drag_started() {
+            if let Some(position) = pointer {
+                let center = to_screen(center_x, center_y);
+                self.gizmo = if let Some(point) = mask_points.iter().position(|point| point.distance(position) < 9.0) {
+                    Some(Gizmo::MaskPoint(point))
+                } else if corners.iter().any(|point| point.distance(position) < 10.0) {
+                    Some(Gizmo::Scale { distance: center.distance(position).max(1.0), scale: clip.scale.at(time) })
+                } else {
+                    Some(Gizmo::Move)
+                };
+            }
+        }
+        if picture.dragged() {
+            let delta = picture.drag_delta() / ratio.max(0.001);
+            let center = to_screen(center_x, center_y);
+            let clip = &mut self.project.clips[index];
+            match self.gizmo {
+                Some(Gizmo::Move) => {
+                    clip.x.set(frame, center_x + delta.x);
+                    clip.y.set(frame, center_y + delta.y);
+                }
+                Some(Gizmo::Scale { distance, scale }) => {
+                    if let Some(position) = pointer {
+                        clip.scale.set(frame, scale * center.distance(position) / distance);
+                    }
+                }
+                Some(Gizmo::MaskPoint(point)) => {
+                    if let (Some(target), Some(position)) = (clip.mask.points.get_mut(point), pointer) {
+                        let (dx, dy) = ((position.x - center.x) / ratio, (position.y - center.y) / ratio);
+                        let (lx, ly) = (dx * cos + dy * sin, -dx * sin + dy * cos);
+                        *target = [lx / (half_w * 2.0).max(1.0) + 0.5, ly / (half_h * 2.0).max(1.0) + 0.5];
+                    }
+                }
+                None => {}
+            }
+        }
+        if picture.drag_stopped() {
+            self.gizmo = None;
+        }
     }
 
     fn tools(&mut self, ui: &mut egui::Ui) {
@@ -1427,6 +1550,12 @@ impl App {
             }
         }
         let mut hit = None;
+        if let Ok(mut ready) = self.thumbs.lock() {
+            for (path, image) in ready.drain() {
+                let texture = ui.ctx().load_texture(format!("thumb-{path}"), image, egui::TextureOptions::LINEAR);
+                self.thumb_textures.insert(path, texture);
+            }
+        }
         let waves = self.waves.lock().ok();
         for (index, clip) in self.project.clips.iter().enumerate() {
             let row = row_rect(row_of(clip.track));
@@ -1469,6 +1598,20 @@ impl App {
             if clip.fade_out > 0 {
                 let x = to_x((clip.end - clip.fade_out.min(clip.end - clip.start)) as f32);
                 content.line_segment([Pos2::new(x, block.top()), block.right_bottom()], Stroke::new(1.0_f32, Color32::WHITE));
+            }
+            if track.kind == TrackKind::Video {
+                if let Some(texture) = clip.media.as_ref().and_then(|path| self.thumb_textures.get(path)) {
+                    let [width, height] = texture.size();
+                    let drawn = Rect::from_min_size(block.min + Vec2::new(1.0, 1.0), Vec2::new(width as f32 * (block.height() - 2.0) / height.max(1) as f32, block.height() - 2.0));
+                    content.with_clip_rect(block.intersect(content.clip_rect())).image(texture.id(), drawn, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+                }
+            }
+            for param in [&clip.x, &clip.y, &clip.scale, &clip.rotation, &clip.opacity] {
+                for key in &param.keys {
+                    let x = to_x(key.frame as f32);
+                    let y = block.bottom() - 6.0;
+                    content.add(egui::Shape::convex_polygon(vec![Pos2::new(x, y - 4.0), Pos2::new(x + 4.0, y), Pos2::new(x, y + 4.0), Pos2::new(x - 4.0, y)], Color32::from_rgb(255, 215, 90), Stroke::NONE));
+                }
             }
             content.with_clip_rect(block.intersect(content.clip_rect())).text(block.min + Vec2::new(6.0, 4.0), egui::Align2::LEFT_TOP, &clip.name, egui::FontId::proportional(11.0), Color32::WHITE);
             if let Some(p) = pointer.filter(|p| block.contains(*p) && p.x >= lane) {
