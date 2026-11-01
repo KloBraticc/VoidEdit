@@ -1,0 +1,26 @@
+name: release macos
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace
+      - run: cargo build --release -p voidedit
+      - run: cp target/release/voidedit voidedit-macos-arm64
+      - run: gh release upload ${{ inputs.tag }} voidedit-macos-arm64 --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}

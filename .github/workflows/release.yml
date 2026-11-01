@@ -18,7 +18,7 @@ jobs:
           - os: ubuntu-22.04
             source: target/release/voidedit
             asset: voidedit-linux-x64
-          - os: macos-14
+          - os: macos-15
             source: target/release/voidedit
             asset: voidedit-macos-arm64
     runs-on: ${{ matrix.os }}
