@@ -20,7 +20,7 @@ pub(crate) const TOP_BAR_HEIGHT: f32 = 36.0;
 const SNAP_PIXELS: f32 = 8.0;
 const HIT_CAPTION: usize = 2;
 const MAX_TEXTURE_SIDE: u32 = 2048;
-const HEADER_WIDTH: f32 = 240.0;
+const HEADER_WIDTH: f32 = 112.0;
 const RULER_HEIGHT: f32 = 44.0;
 const TRACK_HEIGHT: f32 = 64.0;
 const AUTOSAVE_SECONDS: f32 = 60.0;
@@ -2569,7 +2569,7 @@ impl App {
         let (response, painter) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
         let rect = response.rect;
         painter.rect_filled(rect, 0.0_f32, self.glass(0.7));
-        painter.text(rect.min + Vec2::new(HEADER_WIDTH / 2.0, RULER_HEIGHT / 2.0), egui::Align2::CENTER_CENTER, timecode(self.frame, self.project.fps), egui::FontId::proportional(24.0), Color32::WHITE);
+        painter.text(rect.min + Vec2::new(HEADER_WIDTH / 2.0, RULER_HEIGHT / 2.0), egui::Align2::CENTER_CENTER, timecode(self.frame, self.project.fps), egui::FontId::monospace(13.0), Color32::WHITE);
         let accent = self.accent();
         let zoom = self.zoom;
         let lane = rect.left() + HEADER_WIDTH;
@@ -2623,13 +2623,13 @@ impl App {
             painter.line_segment([line.left_bottom(), line.right_bottom()], Stroke::new(1.0_f32, self.shade(1.0)));
             let number = order[row..].iter().filter(|other| self.project.tracks[**other].kind == data.kind).count();
             let code = format!("{}{number}", if data.kind == TrackKind::Video { "V" } else { "A" });
-            painter.text(line.min + Vec2::new(10.0, 8.0), egui::Align2::LEFT_TOP, code, egui::FontId::proportional(13.0), Color32::WHITE);
-            painter.text(line.min + Vec2::new(40.0, 8.0), egui::Align2::LEFT_TOP, &data.name, egui::FontId::proportional(12.0), Color32::LIGHT_GRAY);
-            let mute = Rect::from_min_size(line.min + Vec2::new(10.0, 32.0), Vec2::splat(22.0));
-            let lock = Rect::from_min_size(line.min + Vec2::new(38.0, 32.0), Vec2::splat(22.0));
-            for (button, on, text) in [(mute, data.muted, ph::SPEAKER_HIGH), (lock, data.locked, ph::LOCK_SIMPLE)] {
-                painter.rect_filled(button, 2.0_f32, if on { accent } else { Color32::from_gray(50) });
-                widgets::paint_icon(&painter, button.center(), 15.0, text, Color32::from_gray(190));
+            painter.text(Pos2::new(line.left() + 12.0, line.center().y), egui::Align2::LEFT_CENTER, code, egui::FontId::proportional(13.0), Color32::from_gray(210));
+            let mute = Rect::from_center_size(Pos2::new(line.left() + HEADER_WIDTH - 50.0, line.center().y), Vec2::splat(24.0));
+            let lock = Rect::from_center_size(Pos2::new(line.left() + HEADER_WIDTH - 22.0, line.center().y), Vec2::splat(24.0));
+            for (button, on, icon, off_icon) in [(mute, data.muted, ph::SPEAKER_SLASH, ph::SPEAKER_HIGH), (lock, data.locked, ph::LOCK_SIMPLE, ph::LOCK_SIMPLE_OPEN)] {
+                let hovered = pointer.is_some_and(|p| button.contains(p));
+                let color = if on { accent } else if hovered { Color32::WHITE } else { Color32::from_gray(120) };
+                widgets::paint_icon(&painter, button.center(), 15.0, if on { icon } else { off_icon }, color);
             }
             if response.clicked() {
                 if let Some(p) = pointer {
