@@ -925,7 +925,7 @@ impl App {
         let revealed = path.to_string_lossy().into_owned();
         let spawned = std::thread::Builder::new().name("export".into()).spawn(move || {
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| export_with(&project, &library, &path, options, &shared))).unwrap_or_else(|_| Err("the export stopped unexpectedly".into()));
-            if options.open_folder && matches!(&outcome, Ok(Ok(_))) {
+            if options.open_folder && outcome.is_ok() {
                 home::reveal(&revealed);
             }
             if let Ok(mut slot) = finished.lock() {
