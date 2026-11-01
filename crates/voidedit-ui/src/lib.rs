@@ -108,6 +108,7 @@ pub struct App {
     show_strip: bool,
     show_inspector: bool,
     bin: usize,
+    player_full: bool,
     page: u8,
     page_changed: Instant,
     applied_round: Option<bool>,
@@ -236,6 +237,7 @@ impl App {
             show_strip: true,
             show_inspector: true,
             bin: 0,
+            player_full: false,
             page: 255,
             page_changed: Instant::now(),
             applied_round: None,
@@ -2249,7 +2251,8 @@ impl App {
     }
 
     fn monitor(&mut self, ui: &mut egui::Ui) {
-                let controls = 70.0;
+                let controls = 0.0;
+        let mut shown_rect = None;
         let fps = self.project.fps;
         let area = Vec2::new(ui.available_width(), (ui.available_height() - controls).max(40.0));
         let aspect = self.project.width as f32 / self.project.height as f32;
@@ -2274,6 +2277,7 @@ impl App {
             let shown = self.texture.as_ref().map(egui::TextureHandle::id);
             if let Some(id) = shown {
                 let picture = ui.allocate_rect(Rect::from_center_size(ui.max_rect().center(), size), Sense::click_and_drag());
+                shown_rect = Some(picture.rect);
                 ui.painter().image(id, picture.rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
                 self.preview_overlay(ui, &picture);
                 if self.picking_track && picture.clicked() {
@@ -2303,32 +2307,47 @@ impl App {
         let accent = self.accent();
         let end = self.project.end_frame().max(1);
         let mut position = self.frame as f32;
-        ui.vertical_centered(|ui| {
+        let Some(shown) = shown_rect else { return };
+        let width = (shown.width() - 24.0).clamp(240.0, 620.0);
+        let bar = Rect::from_center_size(Pos2::new(shown.center().x, shown.bottom() - 52.0), Vec2::new(width, 80.0));
+        let visible = ui.ctx().animate_bool_with_time(ui.id().with("player-bar"), ui.rect_contains_pointer(shown), 0.16);
+        if visible <= 0.0 {
+            return;
+        }
+        ui.painter().rect_filled(bar, 8.0_f32, Color32::from_black_alpha((190.0 * visible) as u8));
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(bar.shrink2(Vec2::new(12.0, 6.0))).layout(egui::Layout::top_down(egui::Align::Min)));
+        child.multiply_opacity(visible);
+        child.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
-            ui.horizontal(|ui| {
-                ui.add_space((ui.available_width() - 142.0).max(0.0) / 2.0);
-                if widgets::transport(ui, widgets::Glyph::Back, 20.0).on_hover_text("Previous edit (Up)").clicked() {
-                    self.jump_edit(false);
-                }
-                if widgets::transport(ui, if self.playing { widgets::Glyph::Pause } else { widgets::Glyph::Play }, 24.0).on_hover_text("Play or pause (Space)").clicked() {
-                    self.playing = !self.playing;
-                }
-                if widgets::transport(ui, widgets::Glyph::Forward, 20.0).on_hover_text("Next edit (Down)").clicked() {
-                    self.jump_edit(true);
+            ui.add_space((ui.available_width() - 142.0).max(0.0) / 2.0);
+            if widgets::transport(ui, widgets::Glyph::Back, 18.0).on_hover_text("Previous edit (Up)").clicked() {
+                self.jump_edit(false);
+            }
+            if widgets::transport(ui, if self.playing { widgets::Glyph::Pause } else { widgets::Glyph::Play }, 22.0).on_hover_text("Play or pause (Space)").clicked() {
+                self.playing = !self.playing;
+            }
+            if widgets::transport(ui, widgets::Glyph::Forward, 18.0).on_hover_text("Next edit (Down)").clicked() {
+                self.jump_edit(true);
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let label = if self.player_full { "Exit fullscreen (Esc)" } else { "Fullscreen" };
+                if widgets::head(ui, if self.player_full { ph::CORNERS_IN } else { ph::CORNERS_OUT }, "", self.player_full).on_hover_text(label).clicked() {
+                    self.player_full = !self.player_full;
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.player_full));
                 }
             });
         });
-        ui.horizontal(|ui| {
-            let text = |frame: u32| RichText::new(timecode(frame, fps)).monospace().size(12.0);
+        child.horizontal(|ui| {
+            let text = |frame: u32| RichText::new(timecode(frame, fps)).monospace().size(12.0).color(Color32::WHITE);
             ui.label(text(self.frame));
-            let remaining = ui.available_width() - 92.0;
-            ui.allocate_ui(Vec2::new(remaining.max(40.0), 18.0), |ui| {
-                ui.set_width(remaining.max(40.0));
+            let remaining = (ui.available_width() - 92.0).max(40.0);
+            ui.allocate_ui(Vec2::new(remaining, 18.0), |ui| {
+                ui.set_width(remaining);
                 if widgets::scrubber(ui, &mut position, end as f32, accent) {
                     self.frame = (position as u32).min(self.project.duration - 1);
                 }
             });
-            ui.label(text(end).weak());
+            ui.label(text(end));
         });
     }
 
@@ -3111,13 +3130,21 @@ impl App {
         self.autosave();
         self.finish_tracking();
         self.finish_captions();
+        if self.player_full {
+            if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+                self.player_full = false;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+            }
+            egui::CentralPanel::default().frame(egui::Frame::new().fill(Color32::BLACK)).show_inside(root, |ui| self.monitor(ui));
+            return;
+        }
         self.menu(root);
         self.window_edges(ctx);
         self.windows(ctx);
         let theme = &self.settings.theme;
         let [r, g, b] = theme.card;
         let border = Stroke::new(1.0_f32, Color32::from_gray(12));
-        let card = egui::Frame::new().fill(Color32::from_rgba_unmultiplied(r, g, b, self.card_alpha())).corner_radius(theme.radius).stroke(border).inner_margin(6);
+        let card = egui::Frame::new().fill(Color32::from_rgba_unmultiplied(r, g, b, self.card_alpha())).corner_radius(theme.radius).stroke(border).inner_margin(4);
         let status = egui::Frame::new().fill(self.glass(0.5)).inner_margin(egui::Margin::symmetric(10, 2));
         egui::Panel::bottom("pages").show_separator_line(false).frame(status).show_inside(root, |ui| {
             ui.horizontal(|ui| {
@@ -3128,15 +3155,15 @@ impl App {
                 });
             });
         });
-        egui::Panel::bottom("timeline").resizable(true).default_size(430.0).min_size(180.0).show_separator_line(false).frame(card).show_inside(root, |ui| {
+        egui::Panel::bottom("timeline").resizable(true).default_size(300.0).min_size(160.0).show_separator_line(false).frame(card).show_inside(root, |ui| {
             if self.show_strip {
-                egui::Panel::right("mixer").resizable(false).default_size(150.0).show_separator_line(false).frame(egui::Frame::new().inner_margin(egui::Margin { left: 8, ..Default::default() })).show_inside(ui, |ui| self.mixer(ui));
+                egui::Panel::right("mixer").resizable(false).default_size(110.0).show_separator_line(false).frame(egui::Frame::new().inner_margin(egui::Margin { left: 8, ..Default::default() })).show_inside(ui, |ui| self.mixer(ui));
             }
             self.tools(ui);
             self.timeline(ui);
         });
         if self.show_media || self.show_toolbox {
-            egui::Panel::left("library").resizable(true).default_size(460.0).min_size(300.0).show_separator_line(false).frame(card).show_inside(root, |ui| {
+            egui::Panel::left("library").resizable(true).default_size(340.0).min_size(260.0).show_separator_line(false).frame(card).show_inside(root, |ui| {
                 if self.show_media && self.show_toolbox {
                     let half = ui.available_height() / 2.0;
                     egui::Panel::top("pool").resizable(true).default_size(half).show_separator_line(true).frame(egui::Frame::new()).show_inside(ui, |ui| self.media_pool(ui));
@@ -3149,7 +3176,7 @@ impl App {
             });
         }
         if self.show_inspector {
-            egui::Panel::right("details").resizable(true).default_size(380.0).min_size(240.0).show_separator_line(false).frame(card).show_inside(root, |ui| self.controls_panel(ui));
+            egui::Panel::right("details").resizable(true).default_size(290.0).min_size(220.0).show_separator_line(false).frame(card).show_inside(root, |ui| self.controls_panel(ui));
         }
         egui::CentralPanel::default().frame(card).show_inside(root, |ui| {
             if self.show_studio {
