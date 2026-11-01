@@ -57,6 +57,37 @@ pub fn stacked(ui: &mut egui::Ui, icon: &str, label: &str, active: bool, accent:
     response
 }
 
+pub fn transport(ui: &mut egui::Ui, icon: &str, primary: bool, accent: Color32) -> Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(if primary { 44.0 } else { 34.0 }), Sense::click());
+    let (hover, press) = motion(ui, &response);
+    let radius = rect.width() / 2.0 - press;
+    if primary {
+        ui.painter().circle_filled(rect.center(), radius, mix(accent, Color32::WHITE, hover * 0.12));
+    } else {
+        ui.painter().circle_filled(rect.center(), radius, Color32::WHITE.gamma_multiply(0.08 * hover));
+    }
+    let color = if primary { Color32::WHITE } else { mix(IDLE, Color32::WHITE, hover) };
+    paint_icon(ui.painter(), rect.center(), if primary { 22.0 } else { 19.0 }, icon, color);
+    response
+}
+
+pub fn scrubber(ui: &mut egui::Ui, value: &mut f32, end: f32, accent: Color32) -> bool {
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 18.0), Sense::click_and_drag());
+    let mut changed = false;
+    if let Some(pointer) = response.interact_pointer_pos() {
+        *value = ((pointer.x - rect.left()) / rect.width().max(1.0)).clamp(0.0, 1.0) * end;
+        changed = true;
+    }
+    let hover = ui.ctx().animate_bool_with_time(response.id.with("hover"), response.hovered() || response.dragged(), 0.12);
+    let x = rect.left() + rect.width() * (*value / end.max(1.0)).clamp(0.0, 1.0);
+    let y = rect.center().y;
+    let track = egui::Rect::from_min_max(egui::pos2(rect.left(), y - 1.5), egui::pos2(rect.right(), y + 1.5));
+    ui.painter().rect_filled(track, 2.0_f32, Color32::from_gray(70));
+    ui.painter().rect_filled(egui::Rect::from_min_max(track.min, egui::pos2(x, track.bottom())), 2.0_f32, accent);
+    ui.painter().circle_filled(egui::pos2(x, y), 4.5 + hover * 2.0, Color32::WHITE);
+    changed
+}
+
 pub fn heading(ui: &mut egui::Ui, icon: &str, label: &str, accent: Color32) {
     ui.add_space(6.0);
     ui.label(RichText::new(format!("{icon}  {label}")).strong().color(accent));

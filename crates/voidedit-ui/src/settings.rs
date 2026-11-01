@@ -71,7 +71,7 @@ impl Theme {
 
 impl Default for Theme {
     fn default() -> Self {
-        Self::preset("Studio", [8, 8, 8], [22, 22, 22], [205, 205, 205])
+        Self::preset("Studio", [17, 17, 17], [31, 31, 31], [205, 205, 205])
     }
 }
 

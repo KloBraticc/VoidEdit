@@ -2064,17 +2064,8 @@ impl App {
     }
 
     fn monitor(&mut self, ui: &mut egui::Ui) {
-                let controls = 66.0;
-        let fps_shown = self.project.fps;
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(timecode(self.project.end_frame(), fps_shown)).monospace());
-            ui.label(RichText::new(format!("{fps_shown} fps")).small().weak());
-            let title = self.path.as_ref().and_then(|path| path.file_stem()).map_or("Untitled".to_string(), |stem| stem.to_string_lossy().into_owned());
-            ui.painter().text(ui.max_rect().center(), egui::Align2::CENTER_CENTER, title, egui::FontId::proportional(14.0), Color32::WHITE);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(RichText::new(timecode(self.frame, fps_shown)).monospace());
-            });
-        });
+                let controls = 78.0;
+        let fps = self.project.fps;
         let area = Vec2::new(ui.available_width(), (ui.available_height() - controls).max(40.0));
         let aspect = self.project.width as f32 / self.project.height as f32;
         let size = if area.x / area.y > aspect { Vec2::new(area.y * aspect, area.y) } else { Vec2::new(area.x, area.x / aspect) };
@@ -2128,30 +2119,35 @@ impl App {
         let accent = self.accent();
         let end = self.project.end_frame().max(1);
         let mut position = self.frame as f32;
-        ui.spacing_mut().slider_width = ui.available_width() - 8.0;
-        if ui.add(egui::Slider::new(&mut position, 0.0..=(end as f32)).show_value(false)).changed() {
+        if widgets::scrubber(ui, &mut position, end as f32, accent) {
             self.frame = (position as u32).min(self.project.duration - 1);
         }
         ui.horizontal(|ui| {
-            ui.add_space((ui.available_width() / 2.0 - 90.0).max(0.0));
-            if widgets::pill(ui, ph::SKIP_BACK, "", false, accent).on_hover_text("Previous edit (Up)").clicked() {
+            let width = ui.available_width();
+            ui.allocate_ui_with_layout(Vec2::new(120.0, 44.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.label(RichText::new(timecode(self.frame, fps)).monospace().size(15.0).color(accent));
+            });
+            const CONTROLS_WIDTH: f32 = 34.0 * 4.0 + 44.0 + 7.0 * 4.0;
+            ui.add_space(((width - CONTROLS_WIDTH) / 2.0 - 127.0).max(0.0));
+            ui.spacing_mut().item_spacing.x = 7.0;
+            if widgets::transport(ui, ph::SKIP_BACK, false, accent).on_hover_text("Previous edit (Up)").clicked() {
                 self.jump_edit(false);
             }
-            if widgets::pill(ui, ph::CARET_LEFT, "", false, accent).on_hover_text("Back one frame (Left)").clicked() {
+            if widgets::transport(ui, ph::CARET_LEFT, false, accent).on_hover_text("Back one frame (Left)").clicked() {
                 self.frame = self.frame.saturating_sub(1);
             }
-            if widgets::pill(ui, ph::STOP, "", false, accent).on_hover_text("Stop").clicked() {
-                self.playing = false;
-            }
-            if widgets::pill(ui, if self.playing { ph::PAUSE } else { ph::PLAY }, "", true, accent).on_hover_text("Space").clicked() {
+            if widgets::transport(ui, if self.playing { ph::PAUSE } else { ph::PLAY }, true, accent).on_hover_text("Space").clicked() {
                 self.playing = !self.playing;
             }
-            if widgets::pill(ui, ph::CARET_RIGHT, "", false, accent).on_hover_text("Forward one frame (Right)").clicked() {
+            if widgets::transport(ui, ph::CARET_RIGHT, false, accent).on_hover_text("Forward one frame (Right)").clicked() {
                 self.frame = (self.frame + 1).min(self.project.duration - 1);
             }
-            if widgets::pill(ui, ph::SKIP_FORWARD, "", false, accent).on_hover_text("Next edit (Down)").clicked() {
+            if widgets::transport(ui, ph::SKIP_FORWARD, false, accent).on_hover_text("Next edit (Down)").clicked() {
                 self.jump_edit(true);
             }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(RichText::new(timecode(end, fps)).monospace().size(15.0).weak());
+            });
         });
     }
 
