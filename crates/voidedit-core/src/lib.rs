@@ -100,9 +100,72 @@ pub enum Effect {
     Blur { radius: Param },
     FlipHorizontal,
     FlipVertical,
+    HueShift { degrees: Param },
+    Gamma { amount: Param },
+    Levels { black: Param, white: Param },
+    ColorBalance { red: Param, green: Param, blue: Param },
+    Threshold { level: Param },
+    Noise { amount: Param },
+    ChromaKey { color: [u8; 3], tolerance: Param, softness: Param },
 }
 
-pub const EFFECT_NAMES: [&str; 15] = [
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum Blend {
+    #[default]
+    Normal,
+    Multiply,
+    Screen,
+    Overlay,
+    Add,
+    Darken,
+    Lighten,
+    Difference,
+    SoftLight,
+}
+
+pub const BLENDS: [Blend; 9] = [Blend::Normal, Blend::Multiply, Blend::Screen, Blend::Overlay, Blend::Add, Blend::Darken, Blend::Lighten, Blend::Difference, Blend::SoftLight];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum Transition {
+    #[default]
+    Fade,
+    WipeRight,
+    WipeDown,
+    SlideLeft,
+    SlideUp,
+    Zoom,
+}
+
+pub const TRANSITIONS: [Transition; 6] = [Transition::Fade, Transition::WipeRight, Transition::WipeDown, Transition::SlideLeft, Transition::SlideUp, Transition::Zoom];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum MaskShape {
+    #[default]
+    None,
+    Rectangle,
+    Ellipse,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Mask {
+    pub shape: MaskShape,
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub feather: f32,
+    pub invert: bool,
+}
+
+impl Default for Mask {
+    fn default() -> Self {
+        Self { shape: MaskShape::None, x: 0.5, y: 0.5, width: 0.6, height: 0.6, feather: 0.05, invert: false }
+    }
+}
+
+pub const EFFECT_NAMES: [&str; 22] = [
+    "Hue Shift", "Gamma", "Levels", "Color Balance", "Threshold", "Noise", "Chroma Key",
     "Brightness", "Tint", "Invert", "Grayscale", "Sepia", "Contrast", "Saturation", "Exposure", "Temperature", "Posterize", "Vignette", "Pixelate", "Blur", "Flip Horizontal", "Flip Vertical",
 ];
 
@@ -124,6 +187,13 @@ impl Effect {
             "Blur" => Effect::Blur { radius: Param::new(8.0) },
             "Flip Horizontal" => Effect::FlipHorizontal,
             "Flip Vertical" => Effect::FlipVertical,
+            "Hue Shift" => Effect::HueShift { degrees: Param::new(0.0) },
+            "Gamma" => Effect::Gamma { amount: Param::new(1.0) },
+            "Levels" => Effect::Levels { black: Param::new(0.0), white: Param::new(255.0) },
+            "Color Balance" => Effect::ColorBalance { red: Param::new(0.0), green: Param::new(0.0), blue: Param::new(0.0) },
+            "Threshold" => Effect::Threshold { level: Param::new(128.0) },
+            "Noise" => Effect::Noise { amount: Param::new(10.0) },
+            "Chroma Key" => Effect::ChromaKey { color: [0, 255, 0], tolerance: Param::new(30.0), softness: Param::new(10.0) },
             _ => return None,
         })
     }
@@ -145,6 +215,13 @@ impl Effect {
             Effect::Blur { .. } => "Blur",
             Effect::FlipHorizontal => "Flip Horizontal",
             Effect::FlipVertical => "Flip Vertical",
+            Effect::HueShift { .. } => "Hue Shift",
+            Effect::Gamma { .. } => "Gamma",
+            Effect::Levels { .. } => "Levels",
+            Effect::ColorBalance { .. } => "Color Balance",
+            Effect::Threshold { .. } => "Threshold",
+            Effect::Noise { .. } => "Noise",
+            Effect::ChromaKey { .. } => "Chroma Key",
         }
     }
 }
@@ -183,6 +260,18 @@ pub struct Clip {
     pub speed: f32,
     #[serde(default)]
     pub reverse: bool,
+    #[serde(default)]
+    pub blend: Blend,
+    #[serde(default)]
+    pub transition_in: Transition,
+    #[serde(default)]
+    pub transition_out: Transition,
+    #[serde(default)]
+    pub mask: Mask,
+    #[serde(default)]
+    pub text_stroke: f32,
+    #[serde(default)]
+    pub text_background: bool,
 }
 
 fn default_text_size() -> f32 {
@@ -199,14 +288,21 @@ fn default_speed() -> f32 {
 
 impl Clip {
     pub fn fade(&self, frame: f32) -> f32 {
+        let (entering, leaving) = self.progress(frame);
         let mut value = 1.0f32;
-        if self.fade_in > 0 {
-            value = value.min((frame - self.start as f32) / self.fade_in as f32);
+        if self.transition_in == Transition::Fade {
+            value = value.min(entering);
         }
-        if self.fade_out > 0 {
-            value = value.min((self.end as f32 - frame) / self.fade_out as f32);
+        if self.transition_out == Transition::Fade {
+            value = value.min(leaving);
         }
-        value.clamp(0.0, 1.0)
+        value
+    }
+
+    pub fn progress(&self, frame: f32) -> (f32, f32) {
+        let entering = if self.fade_in > 0 { (frame - self.start as f32) / self.fade_in as f32 } else { 1.0 };
+        let leaving = if self.fade_out > 0 { (self.end as f32 - frame) / self.fade_out as f32 } else { 1.0 };
+        (entering.clamp(0.0, 1.0), leaving.clamp(0.0, 1.0))
     }
 
     pub fn media_seconds(&self, frame: u32, fps: u32) -> f64 {
@@ -375,6 +471,12 @@ impl Project {
             volume: default_volume(),
             speed: 1.0,
             reverse: false,
+            blend: Blend::Normal,
+            transition_in: Transition::Fade,
+            transition_out: Transition::Fade,
+            mask: Mask::default(),
+            text_stroke: 0.0,
+            text_background: false,
         }
     }
 

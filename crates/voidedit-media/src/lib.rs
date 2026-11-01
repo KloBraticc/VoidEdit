@@ -165,6 +165,7 @@ pub struct AudioClip {
     pub end: f64,
     pub offset: f64,
     pub gain: Gain,
+    pub speed: f32,
 }
 
 #[derive(Clone)]
@@ -297,16 +298,20 @@ pub fn mix(library: &Library, clips: &[AudioClip], start: i64, frames: usize, ra
         if source.info().audio().is_none() {
             continue;
         }
-        let from = ((time - clip.start + clip.offset) * rate as f64) as i64;
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| source.audio(from.max(0), frames, rate)));
+        let speed = clip.speed.clamp(0.1, 16.0) as f64;
+        let from = (((time - clip.start) * speed + clip.offset) * rate as f64) as i64;
+        let wanted = ((frames as f64 * speed).ceil() as usize).max(1);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| source.audio(from.max(0), wanted, rate)));
         let Ok(Ok(buffer)) = result else { continue };
         let left = buffer.channels.first();
         let right = buffer.channels.get(1).or(left);
         if let (Some(left), Some(right)) = (left, right) {
-            for index in 0..frames.min(left.len()).min(right.len()) {
+            for index in 0..frames {
+                let source_index = (index as f64 * speed) as usize;
+                let (Some(l), Some(r)) = (left.get(source_index), right.get(source_index)) else { break };
                 let gain = clip.gain.at(time + index as f64 / rate as f64);
-                mixed[index * 2] += left[index] * gain;
-                mixed[index * 2 + 1] += right[index] * gain;
+                mixed[index * 2] += l * gain;
+                mixed[index * 2 + 1] += r * gain;
             }
         }
     }

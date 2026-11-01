@@ -8,7 +8,7 @@ use std::time::Instant;
 
 use eframe::egui::{self, Color32, Pos2, Rect, RichText, Sense, Stroke, Vec2};
 use settings::Settings;
-use voidedit_core::{timecode, Clip, Effect, History, Param, Project, Shape, TrackKind, EFFECT_NAMES};
+use voidedit_core::{timecode, Clip, Effect, History, MaskShape, Param, Project, Shape, TrackKind, BLENDS, EFFECT_NAMES, TRANSITIONS};
 use voidedit_export::{audio_clips, export, Progress};
 use voidedit_media::{waveform, Audio, FrameWant, Frames, Library};
 use voidedit_render::{render, wanted_frame, Frame};
@@ -763,6 +763,12 @@ impl App {
                 egui::CollapsingHeader::new("Text").default_open(true).show(ui, |ui| {
                     ui.add(egui::TextEdit::multiline(text).desired_rows(2).desired_width(f32::INFINITY));
                     ui.add(egui::Slider::new(&mut clip.text_size, 8.0..=400.0).text("Size"));
+                    ui.add(egui::Slider::new(&mut clip.text_stroke, 0.0..=16.0).text("Outline"));
+                    ui.checkbox(&mut clip.text_background, "Background");
+                    ui.horizontal(|ui| {
+                        ui.label("Color");
+                        ui.color_edit_button_srgb(&mut clip.color);
+                    });
                 });
             }
             egui::CollapsingHeader::new("Motion").default_open(true).show(ui, |ui| {
@@ -773,12 +779,46 @@ impl App {
             });
             egui::CollapsingHeader::new("Opacity").default_open(true).show(ui, |ui| {
                 Self::param(ui, accent, "Opacity", &mut clip.opacity, frame, 0.5);
+                egui::ComboBox::from_label("Blend").selected_text(format!("{:?}", clip.blend)).show_ui(ui, |ui| {
+                    for mode in BLENDS {
+                        ui.selectable_value(&mut clip.blend, mode, format!("{mode:?}"));
+                    }
+                });
+            });
+            egui::CollapsingHeader::new("Transitions").default_open(true).show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label("Fade in");
+                    egui::ComboBox::from_id_salt("in").selected_text(format!("{:?}", clip.transition_in)).show_ui(ui, |ui| {
+                        for kind in TRANSITIONS {
+                            ui.selectable_value(&mut clip.transition_in, kind, format!("{kind:?}"));
+                        }
+                    });
+                    ui.label("In");
                     ui.add(egui::DragValue::new(&mut clip.fade_in).suffix(" f"));
-                    ui.label("Fade out");
+                });
+                ui.horizontal(|ui| {
+                    egui::ComboBox::from_id_salt("out").selected_text(format!("{:?}", clip.transition_out)).show_ui(ui, |ui| {
+                        for kind in TRANSITIONS {
+                            ui.selectable_value(&mut clip.transition_out, kind, format!("{kind:?}"));
+                        }
+                    });
+                    ui.label("Out");
                     ui.add(egui::DragValue::new(&mut clip.fade_out).suffix(" f"));
                 });
+            });
+            egui::CollapsingHeader::new("Mask").default_open(false).show(ui, |ui| {
+                egui::ComboBox::from_label("Shape").selected_text(format!("{:?}", clip.mask.shape)).show_ui(ui, |ui| {
+                    for shape in [MaskShape::None, MaskShape::Rectangle, MaskShape::Ellipse] {
+                        ui.selectable_value(&mut clip.mask.shape, shape, format!("{shape:?}"));
+                    }
+                });
+                if clip.mask.shape != MaskShape::None {
+                    ui.add(egui::Slider::new(&mut clip.mask.x, 0.0..=1.0).text("X"));
+                    ui.add(egui::Slider::new(&mut clip.mask.y, 0.0..=1.0).text("Y"));
+                    ui.add(egui::Slider::new(&mut clip.mask.width, 0.01..=2.0).text("Width"));
+                    ui.add(egui::Slider::new(&mut clip.mask.height, 0.01..=2.0).text("Height"));
+                    ui.add(egui::Slider::new(&mut clip.mask.feather, 0.0..=0.5).text("Feather"));
+                    ui.checkbox(&mut clip.mask.invert, "Invert");
+                }
             });
             if clip.media.is_some() {
                 egui::CollapsingHeader::new("Time and Audio").default_open(true).show(ui, |ui| {
@@ -815,6 +855,24 @@ impl App {
                         Effect::Posterize { levels } => Self::param(ui, accent, "Levels", levels, frame, 0.1),
                         Effect::Pixelate { size } => Self::param(ui, accent, "Size", size, frame, 0.25),
                         Effect::Blur { radius } => Self::param(ui, accent, "Radius", radius, frame, 0.25),
+                        Effect::HueShift { degrees } => Self::param(ui, accent, "Degrees", degrees, frame, 1.0),
+                        Effect::Gamma { amount } => Self::param(ui, accent, "Gamma", amount, frame, 0.01),
+                        Effect::Levels { black, white } => {
+                            Self::param(ui, accent, "Black", black, frame, 1.0);
+                            Self::param(ui, accent, "White", white, frame, 1.0);
+                        }
+                        Effect::ColorBalance { red, green, blue } => {
+                            Self::param(ui, accent, "Red", red, frame, 0.5);
+                            Self::param(ui, accent, "Green", green, frame, 0.5);
+                            Self::param(ui, accent, "Blue", blue, frame, 0.5);
+                        }
+                        Effect::Threshold { level } => Self::param(ui, accent, "Level", level, frame, 1.0),
+                        Effect::Noise { amount } => Self::param(ui, accent, "Amount", amount, frame, 0.5),
+                        Effect::ChromaKey { color, tolerance, softness } => {
+                            ui.color_edit_button_srgb(color);
+                            Self::param(ui, accent, "Tolerance", tolerance, frame, 0.5);
+                            Self::param(ui, accent, "Softness", softness, frame, 0.5);
+                        }
                         Effect::Invert | Effect::Grayscale | Effect::Sepia | Effect::FlipHorizontal | Effect::FlipVertical => {}
                     }
                 }

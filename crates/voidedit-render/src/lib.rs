@@ -2,7 +2,7 @@ use std::sync::{Arc, OnceLock};
 
 use ab_glyph::{Font, FontRef, ScaleFont};
 use rayon::prelude::*;
-use voidedit_core::{Clip, Effect, Project, Shape, TrackKind};
+use voidedit_core::{Blend, Clip, Effect, MaskShape, Project, Shape, TrackKind, Transition};
 
 const FONT: &[u8] = include_bytes!("../../../assets/Inter-Medium.ttf");
 
@@ -30,6 +30,11 @@ enum Op {
     Saturation(f32),
     Warm(f32),
     Posterize(f32),
+    Hue(f32),
+    Gamma(f32),
+    Levels(f32, f32),
+    Balance([f32; 3]),
+    Threshold(f32),
 }
 
 struct Resolved {
@@ -48,6 +53,52 @@ struct Resolved {
     pixelate: f32,
     flip_x: bool,
     flip_y: bool,
+    blend: Blend,
+    noise: f32,
+    key: Option<([f32; 3], f32, f32)>,
+    mask: voidedit_core::Mask,
+    wipe_x: f32,
+    wipe_y: f32,
+}
+
+fn blend(mode: Blend, base: f32, top: f32) -> f32 {
+    let (b, t) = (base / 255.0, top / 255.0);
+    let result = match mode {
+        Blend::Normal => t,
+        Blend::Multiply => b * t,
+        Blend::Screen => 1.0 - (1.0 - b) * (1.0 - t),
+        Blend::Overlay => {
+            if b < 0.5 {
+                2.0 * b * t
+            } else {
+                1.0 - 2.0 * (1.0 - b) * (1.0 - t)
+            }
+        }
+        Blend::Add => b + t,
+        Blend::Darken => b.min(t),
+        Blend::Lighten => b.max(t),
+        Blend::Difference => (b - t).abs(),
+        Blend::SoftLight => (1.0 - 2.0 * t) * b * b + 2.0 * t * b,
+    };
+    result * 255.0
+}
+
+fn mask_alpha(mask: &voidedit_core::Mask, u: f32, v: f32) -> f32 {
+    if mask.shape == MaskShape::None {
+        return 1.0;
+    }
+    let (dx, dy) = ((u - mask.x) / (mask.width / 2.0).max(0.001), (v - mask.y) / (mask.height / 2.0).max(0.001));
+    let distance = match mask.shape {
+        MaskShape::Ellipse => (dx * dx + dy * dy).sqrt(),
+        _ => dx.abs().max(dy.abs()),
+    };
+    let feather = mask.feather.max(0.001) / (mask.width.min(mask.height) / 2.0).max(0.001);
+    let alpha = ((1.0 - distance) / feather + 0.5).clamp(0.0, 1.0);
+    if mask.invert {
+        1.0 - alpha
+    } else {
+        alpha
+    }
 }
 
 fn apply(ops: &[Op], mut color: [f32; 3]) -> [f32; 3] {
@@ -75,6 +126,23 @@ fn apply(ops: &[Op], mut color: [f32; 3]) -> [f32; 3] {
                 color[2] -= amount;
             }
             Op::Posterize(levels) => color = color.map(|channel| (channel / 255.0 * levels).round() / levels * 255.0),
+            Op::Hue(radians) => {
+                let (sin, cos) = radians.sin_cos();
+                let [r, g, b] = color;
+                color = [
+                    r * (0.213 + cos * 0.787 - sin * 0.213) + g * (0.715 - cos * 0.715 - sin * 0.715) + b * (0.072 - cos * 0.072 + sin * 0.928),
+                    r * (0.213 - cos * 0.213 + sin * 0.143) + g * (0.715 + cos * 0.285 + sin * 0.14) + b * (0.072 - cos * 0.072 - sin * 0.283),
+                    r * (0.213 - cos * 0.213 - sin * 0.787) + g * (0.715 - cos * 0.715 + sin * 0.715) + b * (0.072 + cos * 0.928 + sin * 0.072),
+                ];
+            }
+            Op::Gamma(power) => color = color.map(|channel| (channel.max(0.0) / 255.0).powf(power) * 255.0),
+            Op::Levels(black, white) => color = color.map(|channel| (channel - black) / (white - black).max(1.0) * 255.0),
+            Op::Balance(shift) => {
+                for index in 0..3 {
+                    color[index] += shift[index];
+                }
+            }
+            Op::Threshold(level) => color = [if luma(color) >= level { 255.0 } else { 0.0 }; 3],
         }
     }
     color
@@ -132,7 +200,7 @@ fn font() -> Option<&'static FontRef<'static>> {
     LOADED.get_or_init(|| FontRef::try_from_slice(FONT).ok()).as_ref()
 }
 
-pub fn text_image(text: &str, size: f32, color: [u8; 3]) -> Option<Image> {
+pub fn text_image(text: &str, size: f32, color: [u8; 3], stroke: f32, background: bool) -> Option<Image> {
     let font = font()?;
     let size = size.clamp(4.0, 800.0);
     let scaled = font.as_scaled(size);
@@ -163,6 +231,36 @@ pub fn text_image(text: &str, size: f32, color: [u8; 3]) -> Option<Image> {
                     }
                 });
             }
+        }
+    }
+    if stroke > 0.0 {
+        let radius = stroke.min(32.0) as i64;
+        let source = pixels.clone();
+        for py in 0..height as i64 {
+            for px in 0..width as i64 {
+                let start = (py as usize * width + px as usize) * 4;
+                if source[start + 3] > 128 {
+                    continue;
+                }
+                let near = (-radius..=radius).any(|dy| {
+                    (-radius..=radius).any(|dx| {
+                        let (nx, ny) = (px + dx, py + dy);
+                        nx >= 0 && ny >= 0 && (nx as usize) < width && (ny as usize) < height && source[(ny as usize * width + nx as usize) * 4 + 3] > 128
+                    })
+                });
+                if near {
+                    pixels[start..start + 4].copy_from_slice(&[0, 0, 0, 255]);
+                }
+            }
+        }
+    }
+    if background {
+        for pixel in pixels.chunks_exact_mut(4) {
+            let alpha = pixel[3] as f32 / 255.0;
+            for channel in &mut pixel[..3] {
+                *channel = (*channel as f32 * alpha) as u8;
+            }
+            pixel[3] = pixel[3].max(170);
         }
     }
     Some(Image { width, height, pixels })
@@ -196,6 +294,12 @@ fn resolve(clip: &Clip, frame: f32, scale: f32, image: Option<Arc<Image>>) -> Op
             Effect::Blur { radius: value } => radius = value.at(frame).max(0.0),
             Effect::FlipHorizontal => flip_x = !flip_x,
             Effect::FlipVertical => flip_y = !flip_y,
+            Effect::HueShift { degrees } => ops.push(Op::Hue(degrees.at(frame).to_radians())),
+            Effect::Gamma { amount } => ops.push(Op::Gamma(1.0 / amount.at(frame).max(0.05))),
+            Effect::Levels { black, white } => ops.push(Op::Levels(black.at(frame), white.at(frame))),
+            Effect::ColorBalance { red, green, blue } => ops.push(Op::Balance([red.at(frame), green.at(frame), blue.at(frame)])),
+            Effect::Threshold { level } => ops.push(Op::Threshold(level.at(frame))),
+            Effect::Noise { .. } | Effect::ChromaKey { .. } => {}
         }
     }
     let image = match (image, radius as usize) {
@@ -203,6 +307,30 @@ fn resolve(clip: &Clip, frame: f32, scale: f32, image: Option<Arc<Image>>) -> Op
         (Some(image), radius) => Some(Arc::new(blur(&image, radius.min(64)))),
         (None, _) => None,
     };
+    let mut noise = 0.0;
+    let mut key = None;
+    for effect in &clip.effects {
+        match effect {
+            Effect::Noise { amount } => noise = amount.at(frame).max(0.0),
+            Effect::ChromaKey { color, tolerance, softness } => key = Some((color.map(|channel| channel as f32), tolerance.at(frame).max(0.0) * 2.55, softness.at(frame).max(0.1) * 2.55)),
+            _ => {}
+        }
+    }
+    let (entering, leaving) = clip.progress(frame);
+    let (mut x, mut y, mut zoom) = (clip.x.at(frame) * scale, clip.y.at(frame) * scale, 1.0f32);
+    let (mut wipe_x, mut wipe_y) = (1.0f32, 1.0f32);
+    for (kind, amount) in [(clip.transition_in, entering), (clip.transition_out, leaving)] {
+        let eased = amount * amount * (3.0 - 2.0 * amount);
+        match kind {
+            Transition::Fade => {}
+            Transition::WipeRight => wipe_x = wipe_x.min(amount),
+            Transition::WipeDown => wipe_y = wipe_y.min(amount),
+            Transition::SlideLeft => x += (1.0 - eased) * clip.width.max(1.0) * size,
+            Transition::SlideUp => y += (1.0 - eased) * clip.height.max(1.0) * size,
+            Transition::Zoom => zoom *= eased.max(0.001),
+        }
+    }
+    let size = size * zoom;
     let (width, height) = match (&clip.text, &image) {
         (Some(_), Some(image)) => (image.width as f32, image.height as f32),
         _ => (clip.width, clip.height),
@@ -213,8 +341,8 @@ fn resolve(clip: &Clip, frame: f32, scale: f32, image: Option<Arc<Image>>) -> Op
         image,
         cos,
         sin,
-        x: clip.x.at(frame) * scale,
-        y: clip.y.at(frame) * scale,
+        x,
+        y,
         half_w: width * size / 2.0,
         half_h: height * size / 2.0,
         shape: clip.shape,
@@ -224,6 +352,12 @@ fn resolve(clip: &Clip, frame: f32, scale: f32, image: Option<Arc<Image>>) -> Op
         pixelate,
         flip_x,
         flip_y,
+        blend: clip.blend,
+        noise,
+        key,
+        mask: clip.mask.clone(),
+        wipe_x,
+        wipe_y,
     })
 }
 
@@ -246,8 +380,13 @@ fn sample(layer: &Resolved, lx: f32, ly: f32) -> Option<([f32; 3], f32)> {
     let row = ((v * image.height as f32) as usize).min(image.height.saturating_sub(1));
     let start = (row * image.width + column) * 4;
     let pixel = image.pixels.get(start..start + 4)?;
-    let color = apply(&layer.ops, [pixel[0] as f32, pixel[1] as f32, pixel[2] as f32]);
-    Some((color, pixel[3] as f32 / 255.0))
+    let source = [pixel[0] as f32, pixel[1] as f32, pixel[2] as f32];
+    let mut alpha = pixel[3] as f32 / 255.0;
+    if let Some((key, tolerance, softness)) = layer.key {
+        let distance = (0..3).map(|index| (source[index] - key[index]).powi(2)).sum::<f32>().sqrt();
+        alpha *= ((distance - tolerance) / softness).clamp(0.0, 1.0);
+    }
+    Some((apply(&layer.ops, source), alpha))
 }
 
 fn draw(layer: &Resolved, px: f32, py: f32) -> Option<([f32; 3], f32)> {
@@ -272,6 +411,11 @@ fn draw(layer: &Resolved, px: f32, py: f32) -> Option<([f32; 3], f32)> {
         (layer.color, coverage)
     };
     alpha *= layer.opacity;
+    let (u, v) = ((lx + layer.half_w) / (layer.half_w * 2.0), (ly + layer.half_h) / (layer.half_h * 2.0));
+    if u > layer.wipe_x || v > layer.wipe_y {
+        return None;
+    }
+    alpha *= mask_alpha(&layer.mask, u, v);
     if alpha <= 0.0 {
         return None;
     }
@@ -280,6 +424,11 @@ fn draw(layer: &Resolved, px: f32, py: f32) -> Option<([f32; 3], f32)> {
         let (nx, ny) = (lx / layer.half_w, ly / layer.half_h);
         let falloff = 1.0 - layer.vignette * ((nx * nx + ny * ny) / 2.0).min(1.0);
         color = color.map(|channel| channel * falloff);
+    }
+    if layer.noise > 0.0 {
+        let seed = (px as u32).wrapping_mul(73_856_093) ^ (py as u32).wrapping_mul(19_349_663) ^ (layer.x as u32).wrapping_mul(83_492_791);
+        let grain = (seed.wrapping_mul(seed | 1) >> 24) as f32 / 255.0 - 0.5;
+        color = color.map(|channel| channel + grain * layer.noise * 2.55);
     }
     Some((color, alpha))
 }
@@ -302,7 +451,7 @@ pub fn render(project: &Project, frame: u32, scale: f32, target: &mut Frame, ima
         .into_iter()
         .filter_map(|clip| {
             let image = match (&clip.text, &clip.media) {
-                (Some(text), _) => Some(Arc::new(text_image(text, clip.text_size, clip.color)?)),
+                (Some(text), _) => Some(Arc::new(text_image(text, clip.text_size, clip.color, clip.text_stroke, clip.text_background)?)),
                 (None, Some(path)) => Some(images(path)?),
                 (None, None) => None,
             };
@@ -318,7 +467,8 @@ pub fn render(project: &Project, frame: u32, scale: f32, target: &mut Frame, ima
             for layer in &layers {
                 if let Some((source, alpha)) = draw(layer, px, py) {
                     for index in 0..3 {
-                        color[index] += (source[index] - color[index]) * alpha;
+                        let mixed = if layer.blend == Blend::Normal { source[index] } else { blend(layer.blend, color[index], source[index]) };
+                        color[index] += (mixed - color[index]) * alpha;
                     }
                 }
             }
@@ -378,6 +528,44 @@ mod tests {
     }
 
     #[test]
+    fn multiply_blend_darkens() {
+        let mut project = small();
+        let mut bottom = project.new_clip(Shape::Solid, 0);
+        bottom.track = 1;
+        bottom.color = [200, 200, 200];
+        let mut top = project.new_clip(Shape::Solid, 0);
+        top.track = 2;
+        top.color = [100, 100, 100];
+        top.blend = Blend::Multiply;
+        project.clips = vec![bottom, top];
+        assert!(first(&project)[0] < 100);
+    }
+
+    #[test]
+    fn mask_hides_outside() {
+        let mut project = small();
+        let mut clip = project.new_clip(Shape::Solid, 0);
+        clip.color = [255, 255, 255];
+        clip.mask.shape = MaskShape::Ellipse;
+        clip.mask.width = 0.2;
+        clip.mask.height = 0.2;
+        project.clips.push(clip);
+        assert_eq!(first(&project), [0, 0, 0]);
+    }
+
+    #[test]
+    fn chroma_key_removes_green() {
+        let mut project = small();
+        let mut clip = project.new_media_clip("a", 0, Some((16, 16)), 1.0);
+        clip.effects.push(Effect::create("Chroma Key").unwrap());
+        project.clips.push(clip);
+        let image = Arc::new(Image { width: 1, height: 1, pixels: vec![0, 255, 0, 255] });
+        let mut frame = Frame::default();
+        render(&project, 0, 1.0, &mut frame, &|_| Some(image.clone()));
+        assert_eq!(&frame.pixels[..3], &[0, 0, 0]);
+    }
+
+    #[test]
     fn invert_changes_shapes() {
         let mut project = small();
         let mut clip = project.new_clip(Shape::Solid, 0);
@@ -389,7 +577,7 @@ mod tests {
 
     #[test]
     fn text_draws_pixels() {
-        let image = text_image("Hi", 40.0, [255, 255, 255]).unwrap();
+        let image = text_image("Hi", 40.0, [255, 255, 255], 2.0, true).unwrap();
         assert!(image.pixels.chunks_exact(4).any(|pixel| pixel[3] > 200));
     }
 
