@@ -2858,8 +2858,10 @@ impl App {
             full.line_segment([Pos2::new(x, rect.top() + RULER_HEIGHT - 8.0), Pos2::new(x, rect.top() + RULER_HEIGHT)], Stroke::new(3.0_f32, Color32::from_rgb(90, 200, 120)));
         }
         let head = to_x(self.frame as f32);
-        full.line_segment([Pos2::new(head, rect.top()), Pos2::new(head, rect.bottom())], Stroke::new(1.5_f32, accent));
-        full.circle_filled(Pos2::new(head, rect.top() + 6.0), 5.0, accent);
+        let snapped = head.round() + 0.5;
+        full.line_segment([Pos2::new(snapped, rect.top() + 12.0), Pos2::new(snapped, rect.bottom() - 12.0)], Stroke::new(1.0_f32, accent));
+        let top = rect.top() + 1.0;
+        full.add(egui::Shape::convex_polygon(vec![Pos2::new(snapped - 5.0, top), Pos2::new(snapped + 5.0, top), Pos2::new(snapped + 5.0, top + 7.0), Pos2::new(snapped, top + 13.0), Pos2::new(snapped - 5.0, top + 7.0)], accent, Stroke::NONE));
         let bar = Rect::from_min_max(Pos2::new(lane, rect.bottom() - 12.0), rect.max);
         let seen = (rect.right() - lane) / zoom;
         let total = (self.project.end_frame() as f32 * 1.1 + 30.0).max(scroll + seen);
