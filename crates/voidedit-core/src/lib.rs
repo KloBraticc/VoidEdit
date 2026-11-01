@@ -638,6 +638,14 @@ impl Project {
         self.clips.push(outer);
     }
 
+    pub fn has_movement(&self) -> bool {
+        self.clips.iter().any(|clip| {
+            let keyed = [&clip.x, &clip.y, &clip.scale, &clip.rotation, &clip.rotation_x, &clip.rotation_y, &clip.depth, &clip.opacity].iter().any(|param| !param.keys.is_empty() || param.expression.is_some());
+            let effect_keys = clip.effects.iter().any(|effect| serde_json::to_value(effect).is_ok_and(|value| has_keyframes(&value)));
+            keyed || effect_keys || clip.fade_in > 0 || clip.fade_out > 0 || !clip.animations.is_empty() || clip.nested.is_some() || clip.lottie.is_some() || clip.typewriter || clip.text_style.wave != 0.0
+        })
+    }
+
     pub fn has_motion(&self) -> bool {
         self.clips.iter().any(|clip| {
             let keyed = [&clip.x, &clip.y, &clip.scale, &clip.rotation, &clip.rotation_x, &clip.rotation_y, &clip.depth, &clip.opacity].iter().any(|param| !param.keys.is_empty() || param.expression.is_some());
@@ -690,7 +698,7 @@ impl Project {
         }
         let wanted = if preview { blur.samples.clamp(2, 4) } else { blur.samples.clamp(2, 64) };
         let useful = (blur.shutter.min(2.0) / self.fps.max(1) as f32 * MAX_SOURCE_FPS).ceil() as u32;
-        let samples = if self.has_motion() { wanted } else { wanted.min(useful.max(1)) };
+        let samples = if self.has_movement() { wanted } else { wanted.min(useful.max(1)) };
         if samples < 2 {
             return vec![frame as f32];
         }
@@ -971,6 +979,14 @@ pub const MAX_NESTING: u32 = 8;
 
 const MAX_SOURCE_FPS: f32 = 120.0;
 
+fn has_keyframes(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(map) => map.iter().any(|(name, item)| (name == "keys" && item.as_array().is_some_and(|keys| !keys.is_empty())) || (name == "expression" && item.is_string()) || has_keyframes(item)),
+        serde_json::Value::Array(items) => items.iter().any(has_keyframes),
+        _ => false,
+    }
+}
+
 fn scale_keyframes(value: &mut serde_json::Value, ratio: f64) {
     match value {
         serde_json::Value::Object(map) => {
@@ -1051,6 +1067,18 @@ pub fn timecode(frame: u32, fps: u32) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn static_effects_do_not_multiply_blur_samples() {
+        let mut project = Project { fps: 240, ..Project::default() };
+        let mut clip = project.new_clip(Shape::Solid, 0);
+        clip.effects.push(Effect::create("Glow").unwrap());
+        project.clips.push(clip);
+        project.motion_blur = MotionBlur { enabled: true, samples: 32, shutter: 1.0 };
+        assert_eq!(project.shutter_times(0, false).len(), 1);
+        project.clips[0].x.set_key(10, 5.0);
+        assert_eq!(project.shutter_times(0, false).len(), 32);
+    }
+
     #[test]
     fn changing_frame_rate_keeps_real_time_positions() {
         let mut project = Project::default();

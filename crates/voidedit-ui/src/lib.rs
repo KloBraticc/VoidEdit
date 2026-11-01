@@ -1478,6 +1478,13 @@ impl App {
                         widgets::setting(ui, "Motion blur", |ui| {
                             ui.checkbox(&mut self.project.motion_blur.enabled, "");
                         });
+                        if self.project.motion_blur.enabled {
+                            widgets::setting(ui, "Blur samples", |ui| {
+                                ui.add(egui::Slider::new(&mut self.project.motion_blur.samples, 2..=64));
+                            });
+                            let samples = self.project.shutter_times(0, false).len();
+                            ui.label(RichText::new(format!("Each frame renders {samples} times with these clips")).small().weak());
+                        }
                     });
                 }
                 if self.options.format == ExportFormat::Mp4 {
@@ -1589,6 +1596,9 @@ impl App {
                 ui.add(egui::ProgressBar::new(done as f32 / total as f32).show_percentage().desired_width(340.0));
                 let rate = done as f32 / elapsed.max(0.01);
                 ui.label(format!("Frame {done} of {total}, {rate:.1} frames per second"));
+                let clock = |seconds: f32| format!("{}:{:02}", seconds as u32 / 60, seconds as u32 % 60);
+                let left = if done > 0 { clock(total.saturating_sub(done) as f32 / rate.max(0.001)) } else { "working it out".to_string() };
+                ui.label(RichText::new(format!("Elapsed {}, time left {left}", clock(elapsed))).weak());
                 if ui.button("Cancel").clicked() {
                     job.progress.cancel.store(true, Ordering::Relaxed);
                     cancelled = true;
