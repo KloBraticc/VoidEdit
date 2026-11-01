@@ -161,6 +161,10 @@ fn projects_folder() -> Option<PathBuf> {
     Some(folder)
 }
 
+pub(crate) fn new_project_path(name: &str) -> Option<PathBuf> {
+    projects_folder().map(|folder| unique_path(&folder, name))
+}
+
 fn unique_path(folder: &Path, name: &str) -> PathBuf {
     let clean: String = name.chars().filter(|c| c.is_alphanumeric() || " -_()".contains(*c)).collect();
     let clean = if clean.trim().is_empty() { "Untitled".to_string() } else { clean.trim().to_string() };
@@ -296,6 +300,7 @@ impl App {
         self.frame = 0;
         match self.write_project(&path) {
             Ok(()) => {
+                self.saved_project = Some(self.project.clone());
                 self.projects.record(&path, &self.project, true);
                 if let Some(entry) = self.projects.entry(&path.to_string_lossy()) {
                     entry.collection = draft.collection.clone();

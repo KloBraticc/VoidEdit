@@ -25,7 +25,7 @@ const MAX_TEXTURE_SIDE: u32 = 2048;
 const HEADER_WIDTH: f32 = 112.0;
 const RULER_HEIGHT: f32 = 44.0;
 const TRACK_HEIGHT: f32 = 64.0;
-const AUTOSAVE_SECONDS: f32 = 60.0;
+const AUTOSAVE_SECONDS: f32 = 2.0;
 const WAVEFORM_POINTS: usize = 800;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -110,6 +110,7 @@ pub struct App {
     show_strip: bool,
     show_inspector: bool,
     bin: usize,
+    saved_project: Option<Project>,
     blur_current: Frame,
     blur_next: Frame,
     blur_index: Option<u32>,
@@ -245,6 +246,7 @@ impl App {
             show_strip: true,
             show_inspector: true,
             bin: 0,
+            saved_project: None,
             blur_current: Frame::default(),
             blur_next: Frame::default(),
             blur_index: None,
@@ -622,6 +624,7 @@ impl App {
         self.project.motion_blur = self.settings.motion_blur.clone();
         self.committed = self.project.clone();
         self.path = None;
+        self.saved_project = Some(self.project.clone());
         self.selected = None;
         self.frame = 0;
     }
@@ -641,6 +644,7 @@ impl App {
                 self.project.motion_blur = self.settings.motion_blur.clone();
                 self.committed = self.project.clone();
                 self.projects.record(&path, &self.project, true);
+                self.saved_project = Some(self.project.clone());
                 self.path = Some(path);
                 self.show_home = false;
                 self.selected = None;
@@ -678,16 +682,34 @@ impl App {
     }
 
     fn autosave(&mut self) {
-        if self.last_autosave.elapsed().as_secs_f32() < AUTOSAVE_SECONDS {
+        if self.saved_project.as_ref() == Some(&self.project) {
+            self.last_autosave = Instant::now();
             return;
         }
+        if self.last_autosave.elapsed().as_secs_f32() < AUTOSAVE_SECONDS || self.project.clips.is_empty() {
+            return;
+        }
+        if self.context.input(|input| input.pointer.any_down()) {
+            return;
+        }
+        self.save_now();
+    }
+
+    pub fn save_now(&mut self) {
         self.last_autosave = Instant::now();
-        if self.project.clips.is_empty() {
+        if self.project.clips.is_empty() && self.path.is_none() {
             return;
         }
-        let target = self.path.as_ref().map(|path| path.with_extension("autosave.voidedit")).or_else(|| Settings::folder().map(|folder| folder.join("autosave.voidedit")));
-        if let Some(target) = target {
-            let _ = self.write_project(&target);
+        if self.path.is_none() {
+            self.path = home::new_project_path("Untitled");
+        }
+        let Some(path) = self.path.clone() else { return };
+        match self.write_project(&path) {
+            Ok(()) => {
+                self.projects.record(&path, &self.project, false);
+                self.saved_project = Some(self.project.clone());
+            }
+            Err(error) => self.status = format!("Could not auto save: {error}"),
         }
     }
 
@@ -3552,6 +3574,10 @@ fn section(ui: &mut egui::Ui, tab: usize, title: impl Into<String>, open: bool, 
 }
 
 impl eframe::App for App {
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.save_now();
+    }
+
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         [0.0; 4]
     }

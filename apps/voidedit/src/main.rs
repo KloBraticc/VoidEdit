@@ -20,6 +20,10 @@ impl egui_software_backend::App for Software {
     fn ui(&mut self, ui: &mut eframe::egui::Ui, _backend: &mut egui_software_backend::SoftwareBackend) {
         self.0.show(ui);
     }
+
+    fn on_exit(&mut self, _context: &eframe::egui::Context) {
+        self.0.save_now();
+    }
 }
 
 #[cfg(windows)]

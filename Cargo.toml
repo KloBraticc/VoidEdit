@@ -37,3 +37,21 @@ incremental = true
 
 [profile.dev.package."*"]
 opt-level = 3
+
+[profile.dev.package.voidedit-render]
+opt-level = 3
+
+[profile.dev.package.voidedit-export]
+opt-level = 3
+
+[profile.dev.package.voidedit-media]
+opt-level = 3
+
+[profile.dev.package.voidedit-audio]
+opt-level = 3
+
+[profile.dev.package.voidedit-core]
+opt-level = 3
+
+[profile.dev.package.voidedit-fx]
+opt-level = 3
