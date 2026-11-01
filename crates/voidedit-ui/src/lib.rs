@@ -139,6 +139,7 @@ pub struct App {
     last_layout_save: Instant,
     remainder: f32,
     selected: Option<usize>,
+    also_selected: Vec<usize>,
     clipboard: Option<Clip>,
     tool: Tool,
     left: LeftTab,
@@ -200,6 +201,7 @@ impl App {
             last_layout_save: Instant::now(),
             remainder: 0.0,
             selected: None,
+            also_selected: Vec::new(),
             clipboard: None,
             tool: Tool::Select,
             left: LeftTab::Project,
@@ -502,7 +504,11 @@ impl App {
     }
 
     fn delete_selected(&mut self, ripple: bool) {
-        if let Some(index) = self.selected.take() {
+        let mut indices = std::mem::take(&mut self.also_selected);
+        indices.extend(self.selected.take());
+        indices.sort_unstable();
+        indices.dedup();
+        for index in indices.into_iter().rev() {
             if ripple {
                 self.project.ripple_delete(index);
             } else if index < self.project.clips.len() {
@@ -651,19 +657,19 @@ impl App {
         if bound(&self.settings, "New text") {
             self.add_text();
         }
-        if plain(egui::Key::ArrowLeft) {
+        if bound(&self.settings, "Previous frame") {
             self.frame = self.frame.saturating_sub(1);
         }
-        if plain(egui::Key::ArrowRight) {
+        if bound(&self.settings, "Next frame") {
             self.frame = (self.frame + 1).min(self.project.duration - 1);
         }
-        if plain(egui::Key::ArrowUp) {
+        if bound(&self.settings, "Previous edit") {
             self.jump_edit(false);
         }
-        if plain(egui::Key::ArrowDown) {
+        if bound(&self.settings, "Next edit") {
             self.jump_edit(true);
         }
-        if plain(egui::Key::Home) {
+        if bound(&self.settings, "Go to start") {
             self.frame = 0;
         }
     }
@@ -1591,7 +1597,7 @@ impl App {
                 TrackKind::Video => Color32::from_rgb(30, 70, 125),
                 TrackKind::Audio => Color32::from_rgb(20, 110, 60),
             };
-            let selected = self.selected == Some(index);
+            let selected = self.selected == Some(index) || self.also_selected.contains(&index);
             let glow = ui.ctx().animate_bool_with_time(egui::Id::new(("clip-glow", index)), selected, 0.12);
             let hover = pointer.is_some_and(|p| block.contains(p));
             let lift = ui.ctx().animate_bool_with_time(egui::Id::new(("clip-hover", index)), hover, 0.1);
@@ -1664,11 +1670,22 @@ impl App {
                     if self.tool == Tool::Razor && !locked {
                         self.project.split(index, time as u32);
                     } else {
+                        if ui.input(|i| i.modifiers.command) && response.clicked() {
+                            if let Some(previous) = self.selected.filter(|previous| *previous != index) {
+                                if !self.also_selected.contains(&previous) {
+                                    self.also_selected.push(previous);
+                                }
+                            }
+                            self.also_selected.retain(|other| *other != index);
+                        } else if !self.also_selected.contains(&index) && self.selected != Some(index) {
+                            self.also_selected.clear();
+                        }
                         self.selected = Some(index);
                         self.drag = (response.drag_started() && !locked).then_some((index, mode));
                     }
                 } else if response.clicked() {
                     self.selected = None;
+                    self.also_selected.clear();
                 }
             }
             if response.dragged() {
@@ -1678,14 +1695,17 @@ impl App {
                     let reach = if self.settings.snapping { (8.0 / zoom) as u32 + 1 } else { 0 };
                     let frames = self.project.snap(time as u32, Some(index), self.frame, reach);
                     let snap_start = self.project.clone();
+                    let mut group_shift = 0i64;
                     if let Some(clip) = self.project.clips.get_mut(index) {
                         match mode {
                             Drag::Move { grab } => {
                                 let length = clip.end - clip.start;
                                 let wanted = (time - grab).max(0.0) as u32;
                                 let start = snap_start.snap(wanted, Some(index), self.frame, reach);
+                                let shift = start as i64 - clip.start as i64;
                                 clip.start = start;
                                 clip.end = start + length;
+                                group_shift = shift;
                                 if let Some(target) = target {
                                     let tracks = &snap_start.tracks;
                                     if tracks[target].kind == tracks[clip.track].kind && !tracks[target].locked {
@@ -1699,6 +1719,16 @@ impl App {
                                 clip.start = start;
                             }
                             Drag::TrimEnd => clip.end = frames.max(clip.start + 1),
+                        }
+                    }
+                    if group_shift != 0 {
+                        let lowest = self.also_selected.iter().filter_map(|other| self.project.clips.get(*other)).map(|clip| clip.start as i64).min().unwrap_or(0);
+                        let shift = group_shift.max(-lowest);
+                        for other in self.also_selected.clone() {
+                            if let Some(clip) = self.project.clips.get_mut(other) {
+                                clip.start = (clip.start as i64 + shift) as u32;
+                                clip.end = (clip.end as i64 + shift) as u32;
+                            }
                         }
                     }
                 } else if in_ruler {

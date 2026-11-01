@@ -191,6 +191,7 @@ pub struct AudioClip {
     pub offset: f64,
     pub gain: Gain,
     pub speed: f32,
+    pub reverse: bool,
     pub pan: f32,
     pub bass: f32,
     pub treble: f32,
@@ -327,7 +328,8 @@ pub fn mix(library: &Library, clips: &[AudioClip], start: i64, frames: usize, ra
             continue;
         }
         let speed = clip.speed.clamp(0.1, 16.0) as f64;
-        let from = (((time - clip.start) * speed + clip.offset) * rate as f64) as i64;
+        let elapsed = if clip.reverse { clip.end - time - length } else { time - clip.start };
+        let from = ((elapsed.max(0.0) * speed + clip.offset) * rate as f64) as i64;
         let wanted = ((frames as f64 * speed).ceil() as usize).max(1);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| source.audio(from.max(0), wanted, rate)));
         let Ok(Ok(buffer)) = result else { continue };
@@ -338,7 +340,8 @@ pub fn mix(library: &Library, clips: &[AudioClip], start: i64, frames: usize, ra
             let (bass, treble) = (10f32.powf(clip.bass / 20.0), 10f32.powf(clip.treble / 20.0));
             let (mut low_left, mut low_right) = (0.0f32, 0.0f32);
             for index in 0..frames {
-                let source_index = (index as f64 * speed) as usize;
+                let position = if clip.reverse { frames - 1 - index } else { index };
+                let source_index = (position as f64 * speed) as usize;
                 let (Some(l), Some(r)) = (left.get(source_index), right.get(source_index)) else { break };
                 let gain = clip.gain.at(time + index as f64 / rate as f64);
                 low_left += (l - low_left) * 0.05;

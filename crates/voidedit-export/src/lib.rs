@@ -43,7 +43,7 @@ pub fn audio_clips(project: &Project) -> Vec<AudioClip> {
         .clips
         .iter()
         .filter(|clip| !project.tracks.get(clip.track).is_some_and(|track| track.muted))
-        .filter(|clip| !clip.reverse && !clip.muted)
+        .filter(|clip| !clip.muted)
         .filter_map(|clip| {
             let (start, end) = (clip.start as f64 / fps, clip.end as f64 / fps);
             Some(AudioClip {
@@ -53,6 +53,7 @@ pub fn audio_clips(project: &Project) -> Vec<AudioClip> {
                 offset: clip.offset as f64 / fps,
                 gain: Gain { level: clip.volume.base.max(0.0) / 100.0 * project.tracks.get(clip.track).map_or(1.0, |track| track.volume.max(0.0) / 100.0), start, end, fade_in: clip.fade_in as f64 / fps, fade_out: clip.fade_out as f64 / fps },
                 speed: clip.speed,
+                reverse: clip.reverse,
                 pan: (clip.pan + project.tracks.get(clip.track).map_or(0.0, |track| track.pan)).clamp(-1.0, 1.0),
                 bass: clip.bass,
                 treble: clip.treble,
