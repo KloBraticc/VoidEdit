@@ -677,6 +677,7 @@ impl App {
             return;
         }
         let command = |key| ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, key));
+        let chord = |settings: &Settings, action: &str| settings.key(action).is_some_and(|key| ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, key)));
         let shift_command = |key| ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, key));
         let shift = |key| ctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, key));
         let plain = |key| ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, key));
@@ -690,23 +691,23 @@ impl App {
         } else if command(egui::Key::S) {
             self.save(false);
         }
-        if command(egui::Key::K) {
+        if chord(&self.settings, "Split (Ctrl)") {
             self.split_at_playhead();
         }
-        if command(egui::Key::C) {
+        if chord(&self.settings, "Copy (Ctrl)") {
             self.copy();
         }
-        if command(egui::Key::V) {
+        if chord(&self.settings, "Paste (Ctrl)") {
             self.paste();
         }
-        if command(egui::Key::D) {
+        if chord(&self.settings, "Duplicate (Ctrl)") {
             self.copy();
             self.paste();
         }
-        if command(egui::Key::I) {
+        if chord(&self.settings, "Import (Ctrl)") {
             self.import();
         }
-        if command(egui::Key::M) {
+        if chord(&self.settings, "Export (Ctrl)") {
             self.show_export = true;
         }
         let bound = |settings: &Settings, action: &str| settings.key(action).is_some_and(|key| ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, key)));
@@ -1350,7 +1351,19 @@ impl App {
                             Self::param(ui, accent, "Amplitude", amplitude, frame, 0.5);
                             Self::param(ui, accent, "Frequency", frequency, frame, 0.1);
                         }
-                        Effect::EdgeDetect | Effect::Mirror | Effect::Emboss | Effect::ChannelSwap => {}
+                        Effect::EdgeDetect | Effect::Mirror | Effect::Emboss | Effect::ChannelSwap | Effect::Sketch => {}
+                        Effect::Letterbox { amount } => Self::param(ui, accent, "Amount", amount, frame, 0.25),
+                        Effect::GradientOverlay { top, bottom, amount } => {
+                            ui.horizontal(|ui| {
+                                ui.color_edit_button_srgb(top);
+                                ui.color_edit_button_srgb(bottom);
+                            });
+                            Self::param(ui, accent, "Amount", amount, frame, 0.5);
+                        }
+                        Effect::Border { size, color } => {
+                            Self::param(ui, accent, "Size", size, frame, 0.5);
+                            ui.color_edit_button_srgb(color);
+                        }
                         Effect::ChromaticAberration { amount } => Self::param(ui, accent, "Amount", amount, frame, 0.25),
                         Effect::Scanlines { strength, spacing } => {
                             Self::param(ui, accent, "Strength", strength, frame, 0.5);

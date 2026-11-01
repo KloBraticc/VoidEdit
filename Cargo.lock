@@ -4952,6 +4952,7 @@ dependencies = [
  "candle-nn",
  "candle-transformers",
  "serde_json",
+ "sha2",
  "tokenizers",
  "ureq",
 ]

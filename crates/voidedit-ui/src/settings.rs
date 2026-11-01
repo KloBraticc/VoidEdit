@@ -20,7 +20,7 @@ impl Default for Settings {
     }
 }
 
-pub const ACTIONS: [(&str, &str); 10] = [("Play or pause", "Space"), ("Selection tool", "V"), ("Razor tool", "C"), ("Marker", "M"), ("New text", "T"), ("Previous frame", "ArrowLeft"), ("Next frame", "ArrowRight"), ("Previous edit", "ArrowUp"), ("Next edit", "ArrowDown"), ("Go to start", "Home")];
+pub const ACTIONS: [(&str, &str); 16] = [("Split (Ctrl)", "K"), ("Copy (Ctrl)", "C"), ("Paste (Ctrl)", "V"), ("Duplicate (Ctrl)", "D"), ("Import (Ctrl)", "I"), ("Export (Ctrl)", "M"), ("Play or pause", "Space"), ("Selection tool", "V"), ("Razor tool", "C"), ("Marker", "M"), ("New text", "T"), ("Previous frame", "ArrowLeft"), ("Next frame", "ArrowRight"), ("Previous edit", "ArrowUp"), ("Next edit", "ArrowDown"), ("Go to start", "Home")];
 
 impl Settings {
     pub fn key(&self, action: &str) -> Option<eframe::egui::Key> {

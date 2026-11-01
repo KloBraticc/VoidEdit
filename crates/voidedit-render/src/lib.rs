@@ -149,6 +149,9 @@ pub struct Warp {
     pub swirl: f32,
     pub segments: f32,
     pub fisheye: f32,
+    pub letterbox: f32,
+    pub gradient: Option<([f32; 3], [f32; 3], f32)>,
+    pub border: Option<(f32, [f32; 3])>,
 }
 
 fn warp_uv(warp: &Warp, u: f32, v: f32) -> (f32, f32) {
@@ -517,6 +520,7 @@ fn resolve(clip: &Clip, frame: f32, scale: f32, image: Option<Arc<Image>>) -> Op
             Effect::Duotone { dark, light } => ops.push(Op::Duotone(dark.map(|channel| channel as f32), light.map(|channel| channel as f32))),
             Effect::Mirror => mirror = true,
             Effect::ChannelSwap => ops.push(Op::Swap),
+            Effect::Letterbox { .. } | Effect::GradientOverlay { .. } | Effect::Border { .. } | Effect::Sketch => {}
             Effect::Emboss | Effect::ChromaticAberration { .. } | Effect::Scanlines { .. } | Effect::Swirl { .. } | Effect::Kaleidoscope { .. } | Effect::Fisheye { .. } => {}
             Effect::HueShift { degrees } => ops.push(Op::Hue(degrees.at(frame).to_radians())),
             Effect::Gamma { amount } => ops.push(Op::Gamma(1.0 / amount.at(frame).max(0.05))),
@@ -554,6 +558,20 @@ fn resolve(clip: &Clip, frame: f32, scale: f32, image: Option<Arc<Image>>) -> Op
                     image = Some(Arc::new(convolve(current, [-2.0, -1.0, 0.0, -1.0, 1.0, 1.0, 0.0, 1.0, 2.0], true)));
                 }
             }
+            Effect::Sketch => {
+                if let Some(current) = &image {
+                    let edges = convolve(current, [-1.0, -1.0, -1.0, -1.0, 8.0, -1.0, -1.0, -1.0, -1.0], true);
+                    let mut pixels = edges.pixels;
+                    for pixel in pixels.chunks_exact_mut(4) {
+                        let gray = 255 - ((pixel[0] as u32 + pixel[1] as u32 + pixel[2] as u32) / 3) as u8;
+                        pixel[..3].fill(gray);
+                    }
+                    image = Some(Arc::new(Image { width: edges.width, height: edges.height, pixels }));
+                }
+            }
+            Effect::Letterbox { amount } => warp.letterbox = amount.at(frame).clamp(0.0, 50.0) / 100.0,
+            Effect::GradientOverlay { top, bottom, amount } => warp.gradient = Some((top.map(|c| c as f32), bottom.map(|c| c as f32), amount.at(frame).clamp(0.0, 100.0) / 100.0)),
+            Effect::Border { size, color } => warp.border = Some((size.at(frame).max(0.0) * scale, color.map(|c| c as f32))),
             Effect::ChromaticAberration { amount } => warp.aberration = amount.at(frame) * scale,
             Effect::Scanlines { strength, spacing } => warp.scanlines = (strength.at(frame).clamp(0.0, 100.0) / 100.0, (spacing.at(frame) * scale).max(1.0)),
             Effect::Swirl { angle } => warp.swirl = angle.at(frame).to_radians(),
@@ -705,6 +723,19 @@ fn draw(layer: &Resolved, px: f32, py: f32) -> Option<([f32; 3], f32)> {
         let (nx, ny) = (lx / layer.half_w, ly / layer.half_h);
         let falloff = 1.0 - layer.vignette * ((nx * nx + ny * ny) / 2.0).min(1.0);
         color = color.map(|channel| channel * falloff);
+    }
+    if let Some((top, bottom, amount)) = layer.warp.gradient {
+        for index in 0..3 {
+            color[index] += (top[index] + (bottom[index] - top[index]) * v - color[index]) * amount;
+        }
+    }
+    if let Some((size, border)) = layer.warp.border {
+        if layer.half_w - lx.abs() < size || layer.half_h - ly.abs() < size {
+            color = border;
+        }
+    }
+    if v < layer.warp.letterbox || v > 1.0 - layer.warp.letterbox {
+        color = [0.0; 3];
     }
     if layer.warp.scanlines.0 > 0.0 && (py / layer.warp.scanlines.1) as i64 % 2 == 0 {
         color = color.map(|channel| channel * (1.0 - layer.warp.scanlines.0));

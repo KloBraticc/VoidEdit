@@ -11,3 +11,4 @@ candle-transformers = "0.8"
 tokenizers = { version = "0.20", default-features = false, features = ["unstable_wasm"] }
 serde_json.workspace = true
 ureq = "2"
+sha2 = "0.10"

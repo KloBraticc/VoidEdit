@@ -4,10 +4,11 @@ use std::path::{Path, PathBuf};
 use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::{ops::softmax, VarBuilder};
 use candle_transformers::models::whisper::{self as whisper, audio, model::Whisper, Config};
+use sha2::{Digest, Sha256};
 use tokenizers::Tokenizer;
 
-const MODEL_BASE: &str = "https://huggingface.co/openai/whisper-tiny/resolve/main/";
-const MODEL_FILES: [&str; 3] = ["config.json", "tokenizer.json", "model.safetensors"];
+const MODEL_BASE: &str = "https://huggingface.co/openai/whisper-tiny/resolve/169d4a4341b33bc18d8881c4b69c2e104e1cc0af/";
+const MODEL_FILES: [(&str, &str); 3] = [("config.json", "ffdccec4f3211f4c63310f2b7098f309fe70f3952cedc5e4d11e43f5b2379b98"), ("tokenizer.json", "27fc476bfe7f17299480be2273fc0608e4d5a99aba2ab5dec5374b4482d1a566"), ("model.safetensors", "7ebd0e69e78190ffe1438491fa05cc1f5c1aa3a4c4db3bc1723adbb551ea2395")];
 const MAX_DOWNLOAD: u64 = 512 * 1024 * 1024;
 const MAX_TOKENS_PER_WINDOW: usize = 224;
 
@@ -22,9 +23,9 @@ pub struct Segment {
 
 pub fn ensure_model(folder: &Path, mut status: impl FnMut(&str)) -> Result<(), String> {
     std::fs::create_dir_all(folder).map_err(|e| e.to_string())?;
-    for name in MODEL_FILES {
+    for (name, digest) in MODEL_FILES {
         let target = folder.join(name);
-        if target.exists() {
+        if target.exists() && matches_digest(&target, digest) {
             continue;
         }
         status(&format!("Downloading the speech model: {name}"));
@@ -33,9 +34,22 @@ pub fn ensure_model(folder: &Path, mut status: impl FnMut(&str)) -> Result<(), S
         let mut file = std::fs::File::create(&temporary).map_err(|e| e.to_string())?;
         std::io::copy(&mut response.into_reader().take(MAX_DOWNLOAD), &mut file).map_err(|e| e.to_string())?;
         drop(file);
+        if !matches_digest(&temporary, digest) {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(format!("{name} failed its integrity check"));
+        }
         std::fs::rename(&temporary, &target).map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+fn matches_digest(path: &Path, digest: &str) -> bool {
+    let Ok(mut file) = std::fs::File::open(path) else { return false };
+    let mut hasher = Sha256::new();
+    if std::io::copy(&mut file, &mut hasher).is_err() {
+        return false;
+    }
+    hasher.finalize().iter().map(|byte| format!("{byte:02x}")).collect::<String>() == digest
 }
 
 fn hz_to_mel(hz: f64) -> f64 {

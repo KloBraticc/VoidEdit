@@ -116,6 +116,10 @@ pub enum Effect {
     Vibrance { amount: Param },
     Duotone { dark: [u8; 3], light: [u8; 3] },
     Mirror,
+    Letterbox { amount: Param },
+    GradientOverlay { top: [u8; 3], bottom: [u8; 3], amount: Param },
+    Border { size: Param, color: [u8; 3] },
+    Sketch,
     Emboss,
     ChromaticAberration { amount: Param },
     Scanlines { strength: Param, spacing: Param },
@@ -215,7 +219,8 @@ impl Default for Mask {
     }
 }
 
-pub const EFFECT_NAMES: [&str; 41] = [
+pub const EFFECT_NAMES: [&str; 45] = [
+    "Letterbox", "Gradient Overlay", "Border", "Sketch",
     "Emboss", "Chromatic Aberration", "Scanlines", "Swirl", "Kaleidoscope", "Fisheye", "Channel Swap",
     "Solarize", "Vibrance", "Duotone", "Mirror",
     "Color Wheels", "Curves", "LUT", "Sharpen", "Glow", "Edge Detect", "Drop Shadow", "Wave",
@@ -254,6 +259,10 @@ impl Effect {
             "Duotone" => Effect::Duotone { dark: [30, 10, 80], light: [255, 220, 120] },
             "Mirror" => Effect::Mirror,
             "Emboss" => Effect::Emboss,
+            "Letterbox" => Effect::Letterbox { amount: Param::new(12.0) },
+            "Gradient Overlay" => Effect::GradientOverlay { top: [255, 80, 120], bottom: [40, 80, 255], amount: Param::new(40.0) },
+            "Border" => Effect::Border { size: Param::new(20.0), color: [255, 255, 255] },
+            "Sketch" => Effect::Sketch,
             "Chromatic Aberration" => Effect::ChromaticAberration { amount: Param::new(6.0) },
             "Scanlines" => Effect::Scanlines { strength: Param::new(40.0), spacing: Param::new(4.0) },
             "Swirl" => Effect::Swirl { angle: Param::new(90.0) },
@@ -301,6 +310,10 @@ impl Effect {
             Effect::Duotone { .. } => "Duotone",
             Effect::Mirror => "Mirror",
             Effect::Emboss => "Emboss",
+            Effect::Letterbox { .. } => "Letterbox",
+            Effect::GradientOverlay { .. } => "Gradient Overlay",
+            Effect::Border { .. } => "Border",
+            Effect::Sketch => "Sketch",
             Effect::ChromaticAberration { .. } => "Chromatic Aberration",
             Effect::Scanlines { .. } => "Scanlines",
             Effect::Swirl { .. } => "Swirl",
