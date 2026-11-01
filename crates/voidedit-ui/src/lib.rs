@@ -16,6 +16,7 @@ use voidedit_export::{audio_clips, export_with, ExportFormat, ExportOptions, Pro
 use voidedit_media::{decode_now, mono_samples, track_point, waveform, Audio, FrameWant, Frames, Library};
 use voidedit_render::{render, Frame};
 
+pub(crate) const TOP_BAR_HEIGHT: f32 = 36.0;
 const SNAP_PIXELS: f32 = 8.0;
 const HIT_CAPTION: usize = 2;
 const MAX_TEXTURE_SIDE: u32 = 2048;
@@ -1043,9 +1044,9 @@ impl App {
 
     fn menu(&mut self, root: &mut egui::Ui) {
         let bar = egui::Frame::new().fill(self.glass(0.5)).inner_margin(egui::Margin { left: 8, right: 0, top: 0, bottom: 0 });
-        egui::Panel::top("menu").show_separator_line(false).frame(bar).show_inside(root, |ui| {
+        egui::Panel::top("menu").exact_size(TOP_BAR_HEIGHT).show_separator_line(false).frame(bar).show_inside(root, |ui| {
             self.title_drag(ui);
-            egui::MenuBar::new().ui(ui, |ui| {
+            ui.horizontal_centered(|ui| {
                                 let accent = self.accent();
                 ui.spacing_mut().item_spacing.x = 3.0;
                 ui.menu_button(RichText::new(ph::LIST).size(17.0), |ui| {
@@ -1220,7 +1221,7 @@ impl App {
                     if widgets::icon_toggle(ui, ph::FADERS, "Mixer", self.show_strip, accent).clicked() {
                         self.show_strip = !self.show_strip;
                     }
-                    ui.painter().text(ui.ctx().content_rect().center_top() + Vec2::new(0.0, 18.0), egui::Align2::CENTER_CENTER, if changed { format!("{name}  •") } else { name }, egui::FontId::proportional(14.0), Color32::WHITE);
+                    ui.painter().text(ui.ctx().content_rect().center_top() + Vec2::new(0.0, TOP_BAR_HEIGHT / 2.0), egui::Align2::CENTER_CENTER, if changed { format!("{name}  •") } else { name }, egui::FontId::proportional(14.0), Color32::WHITE);
                     if let Ok(update) = self.update_status.lock() {
                         if !update.is_empty() {
                             ui.label(RichText::new(update.as_str()).small().color(self.accent()));

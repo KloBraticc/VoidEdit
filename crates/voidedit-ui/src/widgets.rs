@@ -109,7 +109,7 @@ pub enum Caption {
 }
 
 pub fn caption(ui: &mut egui::Ui, kind: Caption) -> Response {
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(46.0, 32.0), Sense::click());
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(46.0, crate::TOP_BAR_HEIGHT), Sense::click());
     let hovered = response.hovered();
     let pressed = response.is_pointer_button_down_on();
     let text = ui.visuals().text_color();

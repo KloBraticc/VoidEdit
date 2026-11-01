@@ -361,9 +361,9 @@ impl App {
         let [r, g, b] = theme.card;
         let card = egui::Frame::new().fill(Color32::from_rgba_unmultiplied(r, g, b, self.card_alpha())).corner_radius(theme.radius).stroke(egui::Stroke::new(1.0_f32, Color32::from_gray(12))).inner_margin(10);
         let bar = egui::Frame::new().fill(self.glass(0.5)).inner_margin(egui::Margin { left: 10, right: 0, top: 0, bottom: 0 });
-        egui::Panel::top("home-bar").show_separator_line(false).frame(bar).show_inside(root, |ui| {
+        egui::Panel::top("home-bar").exact_size(crate::TOP_BAR_HEIGHT).show_separator_line(false).frame(bar).show_inside(root, |ui| {
             self.title_drag(ui);
-            ui.horizontal(|ui| {
+            ui.horizontal_centered(|ui| {
                 ui.label(RichText::new("Void Edit").strong());
                 if !self.status.is_empty() {
                     ui.label(RichText::new(&self.status).small().weak());
