@@ -2815,7 +2815,30 @@ impl App {
             return;
         }
         ui.painter().rect_filled(bar, 0.0_f32, Color32::from_black_alpha((185.0 * visible) as u8));
-        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(bar.shrink2(Vec2::new(8.0, 0.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
+        let inner = bar.shrink2(Vec2::new(8.0, 0.0));
+        let text = |frame: u32| RichText::new(timecode(frame, fps)).monospace().size(12.0).color(Color32::WHITE);
+        let mut right = ui.new_child(egui::UiBuilder::new().max_rect(inner).layout(egui::Layout::right_to_left(egui::Align::Center)));
+        right.multiply_opacity(visible);
+        right.spacing_mut().item_spacing.x = 8.0;
+        let label = if self.player_full { "Exit fullscreen (Esc)" } else { "Fullscreen" };
+        if widgets::head(&mut right, if self.player_full { ph::CORNERS_IN } else { ph::CORNERS_OUT }, "", self.player_full).on_hover_text(label).clicked() {
+            self.player_full = !self.player_full;
+            right.ctx().send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.player_full));
+        }
+        right.spacing_mut().slider_width = 80.0;
+        right.add(egui::Slider::new(&mut self.project.master_volume, 0.0..=200.0).show_value(false)).on_hover_text("Master volume");
+        let silent = self.project.master_volume <= 0.0;
+        if widgets::head(&mut right, if silent { ph::SPEAKER_SLASH } else { ph::SPEAKER_HIGH }, "", false).on_hover_text("Mute").clicked() {
+            if silent {
+                self.project.master_volume = self.volume_before_mute.max(1.0);
+            } else {
+                self.volume_before_mute = self.project.master_volume;
+                self.project.master_volume = 0.0;
+            }
+        }
+        right.label(text(end));
+        let left_edge = right.min_rect().left() - 10.0;
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_max(inner.min, Pos2::new(left_edge.max(inner.left()), inner.bottom()))).layout(egui::Layout::left_to_right(egui::Align::Center)));
         child.multiply_opacity(visible);
         child.spacing_mut().item_spacing.x = 2.0;
         if widgets::transport(&mut child, widgets::Glyph::Back, 14.0).on_hover_text("Previous edit (Up)").clicked() {
@@ -2829,32 +2852,14 @@ impl App {
         }
         child.spacing_mut().item_spacing.x = 10.0;
         child.add_space(8.0);
-        let text = |frame: u32| RichText::new(timecode(frame, fps)).monospace().size(12.0).color(Color32::WHITE);
         child.label(text(self.frame));
-        let remaining = (child.available_width() - 250.0).max(40.0);
+        let remaining = child.available_width().max(20.0);
         child.allocate_ui(Vec2::new(remaining, 18.0), |ui| {
             ui.set_width(remaining);
             if widgets::scrubber(ui, &mut position, end as f32, accent) {
                 self.frame = (position as u32).min(self.project.duration - 1);
             }
         });
-        child.label(text(end));
-        let silent = self.project.master_volume <= 0.0;
-        if widgets::head(&mut child, if silent { ph::SPEAKER_SLASH } else { ph::SPEAKER_HIGH }, "", false).on_hover_text("Mute").clicked() {
-            if silent {
-                self.project.master_volume = self.volume_before_mute.max(1.0);
-            } else {
-                self.volume_before_mute = self.project.master_volume;
-                self.project.master_volume = 0.0;
-            }
-        }
-        child.spacing_mut().slider_width = 80.0;
-        child.add(egui::Slider::new(&mut self.project.master_volume, 0.0..=200.0).show_value(false)).on_hover_text("Master volume");
-        let label = if self.player_full { "Exit fullscreen (Esc)" } else { "Fullscreen" };
-        if widgets::head(&mut child, if self.player_full { ph::CORNERS_IN } else { ph::CORNERS_OUT }, "", self.player_full).on_hover_text(label).clicked() {
-            self.player_full = !self.player_full;
-            child.ctx().send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.player_full));
-        }
     }
 
     fn preview_overlay(&mut self, ui: &egui::Ui, picture: &egui::Response) {
