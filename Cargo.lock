@@ -5900,7 +5900,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "voidedit"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "eframe",
  "egui_software_backend",
@@ -5912,14 +5912,14 @@ dependencies = [
 
 [[package]]
 name = "voidedit-audio"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "voidedit-core"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -5928,7 +5928,7 @@ dependencies = [
 
 [[package]]
 name = "voidedit-export"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "filmcraft-aac",
  "filmcraft-h264enc",
@@ -5943,7 +5943,7 @@ dependencies = [
 
 [[package]]
 name = "voidedit-fx"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "effectcraft-effects",
  "effectcraft-expr",
@@ -5960,7 +5960,7 @@ dependencies = [
 
 [[package]]
 name = "voidedit-media"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "cpal",
  "filmcraft-codecs",
@@ -5973,7 +5973,7 @@ dependencies = [
 
 [[package]]
 name = "voidedit-render"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "ab_glyph",
  "image",
@@ -5987,7 +5987,7 @@ dependencies = [
 
 [[package]]
 name = "voidedit-speech"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "candle-core",
  "candle-nn",
@@ -6000,7 +6000,7 @@ dependencies = [
 
 [[package]]
 name = "voidedit-ui"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "eframe",
  "egui-phosphor",
@@ -6023,7 +6023,7 @@ dependencies = [
 
 [[package]]
 name = "voidedit-update"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "self-replace",
  "serde_json",
